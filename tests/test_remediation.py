@@ -6,7 +6,7 @@ from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import IncidentRef, ProposedAction
-from sre_agent.remediation import ApprovalError, Remediator
+from sre_agent.remediation import ApprovalError, ApprovalPolicy, Remediator
 
 INCIDENT = IncidentRef("PD-1001", TENANT, SERVICE)
 
@@ -17,9 +17,10 @@ def investigate(scenario):
     return result, mcp
 
 
-def make_remediator(mcp, runner=None):
+def make_remediator(state, mcp, runner=None):
     sleeps = []
     remediator = Remediator(runner or MockActionRunner(mcp), mcp, INCIDENT, sleep=sleeps.append)
+    remediator.policy = ApprovalPolicy(state)
     return remediator, sleeps
 
 
@@ -40,7 +41,7 @@ class RemediationTest(unittest.TestCase):
     def test_approved_rollback_is_executed_and_verified(self):
         result, mcp = investigate("bad_deploy")
         runner = MockActionRunner(mcp)
-        remediator, sleeps = make_remediator(mcp, runner)
+        remediator, sleeps = make_remediator(result, mcp, runner)
         proposal = result.proposed_actions[0]
 
         v = remediator.approve(proposal, "alice", transcript=result.messages)
@@ -54,8 +55,8 @@ class RemediationTest(unittest.TestCase):
         self.assertIn("Verification: worked", result.messages[-1]["content"])
 
     def test_wrong_fix_is_reported_as_not_working(self):
-        _, mcp = investigate("dependency_outage")
-        remediator, sleeps = make_remediator(mcp)
+        result, mcp = investigate("dependency_outage")
+        remediator, sleeps = make_remediator(result, mcp)
 
         v = remediator.approve(wrong_rollback(), "alice")
 
@@ -67,7 +68,7 @@ class RemediationTest(unittest.TestCase):
     def test_unreadable_metric_means_unknown_not_success(self):
         result, _ = investigate("bad_deploy")
         mcp = MockMCPClient("bad_deploy", failing_tools={"datadog_query_metrics"})
-        remediator, _ = make_remediator(mcp)
+        remediator, _ = make_remediator(result, mcp)
 
         v = remediator.approve(result.proposed_actions[0], "alice")
 
@@ -75,7 +76,7 @@ class RemediationTest(unittest.TestCase):
 
     def test_execution_failure_is_not_verified(self):
         result, mcp = investigate("bad_deploy")
-        remediator, _ = make_remediator(mcp, MockActionRunner(mcp, fail=True))
+        remediator, _ = make_remediator(result, mcp, MockActionRunner(mcp, fail=True))
         proposal = result.proposed_actions[0]
 
         v = remediator.approve(proposal, "alice")
@@ -86,14 +87,14 @@ class RemediationTest(unittest.TestCase):
     def test_page_team_has_nothing_to_verify(self):
         result, mcp = investigate("dependency_outage")
         page = next(p for p in result.proposed_actions if p.action == "page_team")
-        remediator, _ = make_remediator(mcp)
+        remediator, _ = make_remediator(result, mcp)
 
         self.assertEqual(remediator.approve(page, "alice").verdict, "not_applicable")
 
     def test_cannot_approve_twice_or_after_rejection(self):
         result, mcp = investigate("dependency_outage")
         flag, page = result.proposed_actions
-        remediator, _ = make_remediator(mcp)
+        remediator, _ = make_remediator(result, mcp)
 
         remediator.approve(flag, "alice")
         with self.assertRaises(ApprovalError):
@@ -106,7 +107,7 @@ class RemediationTest(unittest.TestCase):
 
     def test_verification_reads_are_tenant_scoped_and_logged(self):
         result, mcp = investigate("bad_deploy")
-        remediator, _ = make_remediator(mcp)
+        remediator, _ = make_remediator(result, mcp)
         remediator.approve(result.proposed_actions[0], "alice")
 
         self.assertEqual({c["tenant_id"] for c in mcp.calls}, {TENANT})

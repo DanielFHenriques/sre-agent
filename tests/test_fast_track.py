@@ -7,7 +7,7 @@ from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import IncidentRef
-from sre_agent.remediation import Remediator
+from sre_agent.remediation import ApprovalPolicy, Remediator
 
 INCIDENT = IncidentRef("PD-1001", TENANT, SERVICE)
 
@@ -49,7 +49,9 @@ class FastTrackTest(unittest.TestCase):
         self.assertNotIn("rollback", " ".join(c["tool"] for c in mcp.calls))  # nothing ran
         self.assertIn("Fast-track", next(t.text for t in result.timeline if t.kind == "proposed"))
 
-        verdict = Remediator(MockActionRunner(mcp), mcp, INCIDENT, sleep=lambda s: None).approve(p, "alice")
+        remediator = Remediator(MockActionRunner(mcp), mcp, INCIDENT, sleep=lambda s: None)
+        remediator.policy = ApprovalPolicy(result)
+        verdict = remediator.approve(p, "bob")  # low severity: any assigned responder may approve
         self.assertEqual(verdict.verdict, "worked")
 
     def test_major_incident_rollback_is_not_fast_tracked(self):

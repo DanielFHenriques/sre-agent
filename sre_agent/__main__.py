@@ -25,7 +25,7 @@ from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SCENARIOS, SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import AgentResult, IncidentRef, ProposedAction, TimelineEntry, Verification
-from sre_agent.remediation import Remediator
+from sre_agent.remediation import ApprovalPolicy, NotAuthorized, Remediator
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import handover_brief, utc_now
 from sre_agent.triage import summary as triage_summary
@@ -123,7 +123,8 @@ def main() -> None:
         help="comma-separated pending proposals to approve, e.g. 1 or 1,2. Repeat the flag for the next "
         "cycle: used only if a fix fails verification and the agent re-investigates.",
     )
-    parser.add_argument("--approver", default="responder@acme.example")
+    parser.add_argument("--approver", default="alice",
+                        help="who approves (mock roster: alice = Incident Commander; bob, carol = responders)")
     parser.add_argument("--state-dir", help="persist incident state here (checkpointed every step)")
     parser.add_argument("--crash-after-steps", type=int,
                         help="simulate the agent process dying after N model calls (needs --state-dir)")
@@ -165,13 +166,21 @@ def main() -> None:
             parser.error(f"{incident.incident_id} already has saved state in {args.state_dir}; use --recover")
         result = agent.run(incident)
     print_result(result)
+    remediator.policy = ApprovalPolicy(result)
 
     for picks in args.approve:
         chosen = [pending(result)[int(n) - 1] for n in picks.split(",")]
         failed = None
         for proposal in chosen:
-            print(f"\nAPPROVED {proposal.action} by {args.approver}: executing, then verifying")
-            v = remediator.approve(proposal, args.approver, transcript=result.messages, timeline=result.timeline)
+            print(f"\nAPPROVAL of {proposal.action} by {args.approver}")
+            try:
+                v = remediator.approve(proposal, args.approver, transcript=result.messages, timeline=result.timeline)
+            except NotAuthorized as e:
+                print(f"  REFUSED, nothing executed: {e}")
+                if store:
+                    store.save(incident, result)
+                continue
+            print("  authorized: executed, then verified")
             print_verification(v)
             if v.verdict == "did_not_work" and failed is None:
                 failed = v
@@ -182,6 +191,7 @@ def main() -> None:
         print(f"\nRE-INVESTIGATING: {failed.action} did not work.")
         result = agent.resume(incident, result, failed)
         print_result(result)
+        remediator.policy = ApprovalPolicy(result)
 
     if args.handover_to:
         result.timeline.append(TimelineEntry(

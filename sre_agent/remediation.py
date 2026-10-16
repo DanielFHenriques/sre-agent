@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any, Callable, Protocol
 
-from sre_agent.models import IncidentRef, ProposedAction, TimelineEntry, Verification
+from sre_agent.models import AgentResult, IncidentRef, ProposedAction, TimelineEntry, Verification
 from sre_agent.timeline import Now, describe, utc_now
 from sre_agent.tools.executor import MCPClient, ToolExecutor
 
@@ -22,6 +22,50 @@ class ActionRunner(Protocol):
 
 class ApprovalError(Exception):
     pass
+
+
+class NotAuthorized(ApprovalError):
+    pass
+
+
+class ApprovalPolicy:
+    """Who may approve an action on this incident. Read live from the incident at approval time, so a
+    severity raised mid-incident tightens it immediately.
+
+    - Only people on the incident's responder roster (from PagerDuty) can approve or reject.
+    - In a major incident (SEV-1/2), only the Incident Commander can approve.
+    - No roster, no approvals: fail closed.
+
+    Identity (`approver`) is assumed to come from the surface's login (Slack/Teams/PagerDuty SSO), never
+    from text in a chat message, and never from a password or code typed to the agent. For high-risk
+    actions the surface could ask for a fresh SSO login before the approval counts.
+    """
+
+    def __init__(self, state: AgentResult):
+        self.state = state
+
+    def roster(self) -> dict[str, str]:
+        for m in self.state.messages:
+            if m["role"] == "tool" and '"responders"' in str(m.get("content")):
+                try:
+                    return {r["user"]: r["role"] for r in json.loads(m["content"])["responders"]}
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    return {}
+        return {}
+
+    def check(self, approver: str, approving: bool) -> None:
+        roster = self.roster()
+        incident = self.state.incident_id
+        if not roster:
+            raise NotAuthorized(f"no responder roster for {incident}; approvals are refused until it is known")
+        role = roster.get(approver)
+        if role is None:
+            raise NotAuthorized(f"{approver} is not an assigned responder on {incident}")
+        mode = (self.state.triage or {}).get("response_mode", "major")  # unknown severity: strictest rule
+        if approving and mode == "major" and role != "incident_commander":
+            raise NotAuthorized(
+                f"{incident} is a major incident: only the Incident Commander can approve actions ({approver} is a {role})"
+            )
 
 
 class Remediator:
@@ -39,11 +83,14 @@ class Remediator:
         self.poll_interval_s = poll_interval_s
         self.sleep = sleep
         self.now = now
+        # Must be set (ApprovalPolicy(state)) before anything can be approved. Fail closed.
+        self.policy: ApprovalPolicy | None = None
         # Verification reads go through the same policy gate as the agent's: tenant-scoped and logged.
         self.executor = ToolExecutor(mcp, incident)
 
     def reject(self, proposal: ProposedAction, rejected_by: str, timeline: list[TimelineEntry] | None = None) -> None:
         self._require_pending(proposal)
+        self._authorize(proposal, rejected_by, timeline, approving=False)
         proposal.status = "rejected"
         proposal.decided_by = rejected_by
         self._log(timeline, "rejected", f"Rejected {describe(proposal)}.", rejected_by)
@@ -58,6 +105,7 @@ class Remediator:
         """Run an approved proposal, then check its how_to_verify. Appends the outcome to the transcript
         (if given) so the next model turn starts from what actually happened, and to the timeline."""
         self._require_pending(proposal)
+        self._authorize(proposal, approved_by, timeline, approving=True)
         proposal.status = "approved"
         proposal.decided_by = approved_by
         self._log(timeline, "approved", f"Approved {describe(proposal)}.", approved_by)
@@ -77,6 +125,16 @@ class Remediator:
         if transcript is not None:
             transcript.append({"role": "user", "content": _transcript_note(proposal, result)})
         return result
+
+    def _authorize(self, proposal, who: str, timeline, approving: bool) -> None:
+        if self.policy is None:
+            raise NotAuthorized("no approval policy loaded; refusing to run anything")
+        try:
+            self.policy.check(who, approving)
+        except NotAuthorized as e:
+            verb = "Approval" if approving else "Rejection"
+            self._log(timeline, "approval_refused", f"{verb} of {describe(proposal)} by {who} refused: {e}", who)
+            raise
 
     def _log(self, timeline: list[TimelineEntry] | None, kind: str, text: str, actor: str) -> None:
         if timeline is not None:

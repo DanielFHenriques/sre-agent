@@ -7,7 +7,7 @@ from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import IncidentRef, Verification
-from sre_agent.remediation import Remediator
+from sre_agent.remediation import ApprovalPolicy, Remediator
 
 INCIDENT = IncidentRef("PD-1001", TENANT, SERVICE)
 
@@ -18,6 +18,7 @@ def first_fix_fails(budget=Budget()):
     agent = SREAgent(MockReasoningLLM(), mcp, budget)
     remediator = Remediator(MockActionRunner(mcp), mcp, INCIDENT, sleep=lambda s: None)
     result = agent.run(INCIDENT)
+    remediator.policy = ApprovalPolicy(result)
     verification = remediator.approve(result.proposed_actions[0], "alice", transcript=result.messages)
     return agent, remediator, result, verification
 

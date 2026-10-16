@@ -9,7 +9,7 @@ from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import IncidentRef
-from sre_agent.remediation import Remediator
+from sre_agent.remediation import ApprovalPolicy, Remediator
 from sre_agent.state import ConflictError, FileStateStore, to_dict
 from sre_agent.timeline import handover_brief
 
@@ -148,6 +148,7 @@ class TimelineAndHandoverTest(unittest.TestCase):
         agent = SREAgent(MockReasoningLLM(), mcp, store=self.store)
         remediator = Remediator(MockActionRunner(mcp), mcp, INCIDENT, sleep=lambda s: None)
         first = agent.run(INCIDENT)
+        remediator.policy = ApprovalPolicy(first)
         v = remediator.approve(first.proposed_actions[0], "alice", transcript=first.messages, timeline=first.timeline)
         self.store.save(INCIDENT, first)
         second = agent.resume(INCIDENT, first, v)  # continues the stored version: no conflict

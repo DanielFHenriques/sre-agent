@@ -29,6 +29,12 @@ _INCIDENT = {
     "onset_estimate": "2026-10-16T02:54:00Z",
     "now": "2026-10-16T03:05:00Z",
     "alert": {"monitor": "checkout-api error rate", "threshold": 0.05, "value": 0.21},
+    # PagerDuty's responder roster for this incident. Approvals are checked against it.
+    "responders": [
+        {"user": "alice", "role": "incident_commander"},
+        {"user": "bob", "role": "responder"},
+        {"user": "carol", "role": "responder"},
+    ],
 }
 
 _SERVICE_CONTEXT = {
