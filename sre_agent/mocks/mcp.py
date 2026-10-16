@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 from typing import Any
 
 from sre_agent.mocks.fixtures import EFFECTS, SCENARIOS, TENANT
@@ -34,6 +35,8 @@ class MockMCPClient:
         if tool in self.failing_tools:
             raise TimeoutError(f"{server}.{tool} timed out")
         payload = self.data[tool]
+        if tool == "salesforce_search_cases":
+            return _aggregate_cases(payload, arguments["service_id"], arguments["since"])
         if tool == "datadog_query_metrics":
             metric = arguments["metric"]
             if metric in self._pending_metrics:
@@ -43,3 +46,19 @@ class MockMCPClient:
                     payload = {**payload, metric: self._pending_metrics[metric]}
             return {"metric": metric, **payload[metric]}
         return copy.deepcopy(payload)
+
+
+def _aggregate_cases(payload: dict[str, Any], service_id: str, since: str) -> dict[str, Any]:
+    """What a well-built Salesforce MCP tool returns: counts at the source plus a small sample."""
+    since_ts = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    related = [
+        c for c in payload["cases"]
+        if c["related_service"] == service_id and datetime.fromisoformat(c["created_at"].replace("Z", "+00:00")) >= since_ts
+    ]
+    return {
+        "since": since,
+        "related_count": len(related),
+        "enterprise_count": sum(1 for c in related if c["tier"] == "enterprise"),
+        "baseline_per_hour": payload["baseline_per_hour"],
+        "sample": [{k: c[k] for k in ("case_id", "created_at", "tier", "subject")} for c in related[:3]],
+    }

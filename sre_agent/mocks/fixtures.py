@@ -10,6 +10,7 @@ Both page as "checkout-api 5xx error rate above 5%". They differ in the evidence
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 TENANT = "acme-corp"
@@ -302,11 +303,13 @@ _UNRELATED_CASE = {
 
 
 def _cases(n: int, subject: str, enterprise: int) -> dict[str, Any]:
-    """n related cases opened after the 02:54 onset, `enterprise` of them from enterprise accounts."""
+    """n related cases opened after the 02:54 onset, `enterprise` of them from enterprise accounts.
+    This is the raw case list the mock Salesforce server aggregates over (see mocks/mcp.py)."""
+    first = datetime(2026, 10, 16, 2, 56, tzinfo=timezone.utc)
     cases = [
         {
             "case_id": f"500-{1100 + i}",
-            "created_at": f"2026-10-16T02:{56 + i // 4:02d}:{(i * 13) % 60:02d}Z",
+            "created_at": (first + timedelta(seconds=17 * i)).isoformat().replace("+00:00", "Z"),
             "account": f"Customer {i + 1}",
             "tier": "enterprise" if i < enterprise else "standard",
             "subject": subject,
@@ -314,7 +317,7 @@ def _cases(n: int, subject: str, enterprise: int) -> dict[str, Any]:
         }
         for i in range(n)
     ]
-    return {"window_minutes": 60, "baseline_per_hour": 1.5, "cases": [_UNRELATED_CASE, *cases]}
+    return {"baseline_per_hour": 1.5, "cases": [_UNRELATED_CASE, *cases]}
 
 
 for _name, _cases_result in {

@@ -85,4 +85,5 @@ class AgentResult:
     messages: list[dict[str, Any]] = field(default_factory=list)
     cycle: int = 1  # 1 = first investigation, 2+ = re-investigation after a failed fix
     timeline: list[TimelineEntry] = field(default_factory=list)
+    triage: dict[str, Any] | None = None  # severity, priority, response mode; see triage.py
     version: int = 0  # bumped on every save; used to detect two writers (optimistic concurrency)

@@ -18,6 +18,7 @@ from sre_agent.models import AgentResult, IncidentRef, TimelineEntry, Verificati
 from sre_agent.prompts import SYSTEM_PROMPT
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import Now, investigation_entries, proposal_entry, utc_now
+from sre_agent.triage import raise_only, summary as triage_summary, triage
 from sre_agent.tools.executor import MCPClient, ToolExecutor
 from sre_agent.tools.registry import openai_tools
 
@@ -33,15 +34,39 @@ class Budget:
     max_cycles: int = 3  # investigations per incident: the first plus re-investigations after failed fixes
 
 
-def prefetch_calls(incident: IncidentRef) -> list[tuple[str, dict[str, Any]]]:
-    """Always needed, so fetched before the first model call. Saves several round-trips."""
+def prefetch_identity(incident: IncidentRef) -> list[tuple[str, dict[str, Any]]]:
+    """Wave 1: what the incident is, what the service is, and which sources it has."""
     svc = incident.service_id
     return [
         ("pagerduty_get_incident", {"incident_id": incident.incident_id}),
         ("pagerduty_get_service_context", {"service_id": svc}),
-        ("changes_list_recent", {"service_id": svc, "lookback_minutes": 180}),
-        ("datadog_list_triggered_monitors", {"service_id": svc}),
+        ("pagerduty_list_service_integrations", {"service_id": svc}),
     ]
+
+
+def prefetch_signals(
+    incident: IncidentRef, integrations: dict[str, Any], details: dict[str, Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Wave 2: what triage needs plus what every investigation needs, only from sources the service has.
+
+    If the integrations lookup failed, try everything: for reads, failing open costs a few errors.
+    """
+    svc = incident.service_id
+    provides = {p for i in integrations.get("integrations", []) for p in i.get("provides", [])}
+    has = (lambda capability: capability in provides) if "integrations" in integrations else (lambda _: True)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    if has("deploys"):
+        calls.append(("changes_list_recent", {"service_id": svc, "lookback_minutes": 180}))
+    if has("monitors"):
+        calls.append(("datadog_list_triggered_monitors", {"service_id": svc}))
+    if has("metrics"):
+        calls += [
+            ("datadog_query_metrics", {"service_id": svc, "metric": "business_kpi", "lookback_minutes": 30}),
+            ("datadog_query_metrics", {"service_id": svc, "metric": "error_rate", "lookback_minutes": 30}),
+        ]
+    if has("support_cases") and "onset_estimate" in details:
+        calls.append(("salesforce_search_cases", {"service_id": svc, "since": details["onset_estimate"]}))
+    return calls
 
 
 class SREAgent:
@@ -78,19 +103,50 @@ class SREAgent:
             "Investigate and recommend the next step.",
         })
 
-        # Prefetch goes into the transcript as if the model had asked, so every model sees one format.
-        # Sequential here; in production these run concurrently.
-        prefetch = [
-            {"id": f"prefetch_{i}", "type": "function", "function": {"name": n, "arguments": json.dumps(a)}}
-            for i, (n, a) in enumerate(prefetch_calls(incident))
-        ]
-        self._append(state.messages, {"role": "assistant", "content": None, "tool_calls": prefetch})
+        # Prefetch, no model: two waves, because which sources to read depends on the service's integrations.
         signatures: set[tuple[str, str]] = set()
-        for call in prefetch:
-            self._run_call(call, executor, state.messages, signatures)
+        seen = self._prefetch(prefetch_identity(incident), "prefetch_a", executor, state, signatures)
+        seen |= self._prefetch(
+            prefetch_signals(
+                incident, seen.get("pagerduty_list_service_integrations", {}), seen.get("pagerduty_get_incident", {})
+            ),
+            "prefetch_b", executor, state, signatures,
+        )
+
+        # Triage, no model: severity and priority from data, before anyone reasons about causes.
+        state.triage = triage(
+            seen.get("pagerduty_get_incident", {}), seen.get("business_kpi"), seen.get("salesforce_search_cases")
+        )
+        state.timeline.append(TimelineEntry(
+            self.now(), "triage", f"Triage: {triage_summary(state.triage)} {' '.join(state.triage['signals'])}", "agent",
+        ))
+        self._append(state.messages, {
+            "role": "user",
+            "content": f"[triage] {triage_summary(state.triage)} Signals: {' '.join(state.triage['signals'])} "
+            "This severity was set from data. If your investigation shows the impact is worse, say so in "
+            "impact.suggested_severity; it can be raised, never lowered.",
+        })
         self._checkpoint(incident, state)
 
         return self._investigate(incident, state, executor, signatures, started, previous_assessment=None)
+
+    def _prefetch(self, calls, prefix, executor, state, signatures) -> dict[str, Any]:
+        """Run calls without the model; record them in the transcript as if the model had asked, so every
+        model sees one format. Returns results by tool name (metrics by metric name).
+        Sequential here; in production these run concurrently."""
+        if not calls:
+            return {}
+        tool_calls = [
+            {"id": f"{prefix}_{i}", "type": "function", "function": {"name": n, "arguments": json.dumps(a)}}
+            for i, (n, a) in enumerate(calls)
+        ]
+        self._append(state.messages, {"role": "assistant", "content": None, "tool_calls": tool_calls})
+        results: dict[str, Any] = {}
+        for call, (name, args) in zip(tool_calls, calls):
+            self._run_call(call, executor, state.messages, signatures)
+            results[args.get("metric", name)] = json.loads(state.messages[-1]["content"])
+        self._checkpoint(executor.incident, state)
+        return results
 
     def resume(self, incident: IncidentRef, previous: AgentResult, verification: Verification) -> AgentResult:
         """Re-investigate after an approved action did not work, on the same transcript.
@@ -112,6 +168,7 @@ class SREAgent:
             messages=list(previous.messages),
             cycle=previous.cycle + 1,
             timeline=list(previous.timeline),
+            triage=previous.triage,
             version=previous.version,
         )
         executor = self._executor(incident, state)
@@ -235,6 +292,11 @@ class SREAgent:
         state.assessment = assessment
         state.stop_reason = stop_reason
         state.timeline.extend(investigation_entries(self.now(), previous_assessment, assessment, stop_reason, state.cycle))
+        if state.triage is not None:
+            impact = assessment.get("impact") or {}
+            note = raise_only(state.triage, impact.get("suggested_severity"), impact.get("scope", "investigation findings"))
+            if note:
+                state.timeline.append(TimelineEntry(self.now(), "triage", note, "agent"))
         self._checkpoint(incident, state)
         return state
 

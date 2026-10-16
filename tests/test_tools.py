@@ -72,7 +72,7 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(self.mcp.calls[-1]["tenant_id"], TENANT)
 
     def test_support_cases_come_from_salesforce_scoped_to_tenant(self):
-        out = self.ex.execute("salesforce_search_cases", json.dumps({"service_id": SERVICE, "lookback_minutes": 60}))
+        out = self.ex.execute("salesforce_search_cases", json.dumps({"service_id": SERVICE, "since": "2026-10-16T02:54:00Z"}))
         self.assertIn("baseline_per_hour", out)
         self.assertEqual((self.mcp.calls[-1]["server"], self.mcp.calls[-1]["tenant_id"]), ("salesforce", TENANT))
 

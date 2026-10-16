@@ -77,14 +77,18 @@ class MockReasoningLLM:
                 ("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
                 for m in ("request_rate", "db_pool_usage", "cpu")
             ] if resumed_at is not None else []
+            # On the first pass, prefetch already read the KPI and error rate; after a failed fix, re-read them.
+            impact_reads = [
+                ("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
+                for m in ("business_kpi", "error_rate")
+                if resumed_at is not None or seen.metric(m) is None
+            ]
             return self._calls(
                 f"{', '.join(sorted(tried))} did not fix it, so my first hypothesis was wrong. Re-reading everything "
                 "fresh and looking wider: traffic and saturation too."
                 if resumed_at is not None
-                else "Sizing up customer impact, error and latency trend, error logs, and dependency health in parallel.",
-                wider + [
-                    ("datadog_query_metrics", {"service_id": service, "metric": "business_kpi", "lookback_minutes": window}),
-                    ("datadog_query_metrics", {"service_id": service, "metric": "error_rate", "lookback_minutes": window}),
+                else "Triage is done. Checking the latency trend, error logs, and dependency health in parallel.",
+                wider + impact_reads + [
                     ("datadog_query_metrics", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
                     ("datadog_search_logs", {"service_id": service, "level": "error", "query": None, "lookback_minutes": window}),
                     ("datadog_get_dependency_health", {"service_id": service}),

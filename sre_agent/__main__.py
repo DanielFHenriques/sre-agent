@@ -28,6 +28,7 @@ from sre_agent.models import AgentResult, IncidentRef, ProposedAction, TimelineE
 from sre_agent.remediation import Remediator
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import handover_brief, utc_now
+from sre_agent.triage import summary as triage_summary
 
 
 def _short(text: str, n: int = 110) -> str:
@@ -70,10 +71,16 @@ def print_result(result: AgentResult) -> None:
     print("\n" + "=" * 78)
     print(f"ASSESSMENT (cycle {result.cycle})  confidence={a.get('confidence')}  stop={result.stop_reason}  "
           f"model_steps={result.steps}")
+    t = result.triage
+    if t:
+        print(f"  TRIAGE  {triage_summary(t)}")
+        for s in t["signals"]:
+            print(f"          - {s}")
+        print(f"          {t['recommendation']}")
     print(f"  {a.get('summary')}")
     impact = a.get("impact") or {}
     if impact:
-        print(f"  IMPACT  suggested {impact['suggested_severity']} (Incident Commander to confirm): {impact['scope']}")
+        print(f"  IMPACT  {impact['scope']}")
     for h in a.get("hypotheses", []):
         print(f"  - [{h['confidence']}] {h['cause']}")
         for e in h["evidence_for"]:

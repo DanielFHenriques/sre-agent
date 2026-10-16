@@ -157,14 +157,14 @@ class TimelineAndHandoverTest(unittest.TestCase):
         result = self.full_red_herring()
         kinds = [t.kind for t in result.timeline]
         self.assertEqual(kinds, [
-            "triggered", "proposed", "impact", "hypothesis",
+            "triggered", "triage", "proposed", "impact", "hypothesis",
             "approved", "executed", "verified",
             "reinvestigating", "proposed", "hypothesis",
         ])
         self.assertLess(len(result.timeline), len(result.tool_log))
         changed = result.timeline[-1].text
         self.assertIn("Changed leading hypothesis from 'Bad deploy v2.15.0'", changed)
-        self.assertEqual(result.timeline[4].actor, "alice")
+        self.assertEqual(result.timeline[5].actor, "alice")
 
     def test_state_after_resume_is_what_is_stored(self):
         result = self.full_red_herring()

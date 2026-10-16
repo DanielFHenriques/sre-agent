@@ -57,9 +57,13 @@ LIST_SERVICE_INTEGRATIONS = function_tool(
 
 SEARCH_SUPPORT_CASES = function_tool(
     "salesforce_search_cases",
-    "Customer support cases opened in the lookback window that may relate to this service, with the "
-    "normal rate of new cases. A burst of related cases after onset means the incident is customer-facing.",
-    {"service_id": SERVICE_ID, "lookback_minutes": LOOKBACK},
+    "Customer support cases related to this service opened since a time (use the incident onset): counts, "
+    "enterprise-account count, the normal rate of new cases, and a small sample. Aggregated at the source so "
+    "a big burst cannot blow the context. A burst after onset means the incident is customer-facing.",
+    {
+        "service_id": SERVICE_ID,
+        "since": {"type": "string", "description": "ISO 8601 timestamp, normally the incident's onset_estimate."},
+    },
 )
 
 LIST_RECENT_CHANGES = function_tool(
