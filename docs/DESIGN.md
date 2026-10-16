@@ -1,0 +1,115 @@
+# SRE Agent: design brainstorm
+
+Working notes for the take-home. This is the "sketching with two colleagues" doc:
+what the agent fetches, in what order, how it gets to a decision, and what it is
+allowed to do about it. Code follows this doc commit by commit.
+
+## Constraints we are designing for (from the brief)
+
+- One responder, one surface, one agent.
+- All third-party data comes through **MCP tool calls** (Datadog, PagerDuty, VCS/CD, runbooks).
+- Read-only tools, plus a **small predefined catalog of actions that need human approval**.
+  No autonomous actions.
+- Multi-tenant SaaS: every call is scoped to one customer.
+- Tool and message format: **OpenAI Chat Completions function calling** (`tools=[{"type": "function", ...}]`,
+  `strict: true` schemas, `tool_calls` / `role: "tool"` messages). The transcript in that format
+  *is* the agent's working state, which makes it easy to persist, replay and evaluate.
+
+## How many agents?
+
+**One LLM agent.** Everything around it is deterministic code, not more agents:
+
+| Component | LLM? | Job |
+|---|---|---|
+| **Investigator agent** | yes | Decides which evidence to fetch next, forms hypotheses, recommends one next step. |
+| Context prefetcher | no | On trigger, fetches the things we *always* need, in parallel, before the first model call. |
+| Tool executor / policy gate | no | Validates arguments, injects tenant scope, enforces timeouts and output size, logs every call. |
+| Approval gate | no | Turns an action proposal into a pending request for a human. Never executes. |
+| Budget / stop controller | no | Step, tool-call and wall-clock limits; stall detection; forces a final answer. |
+
+Why not specialist sub-agents (logs agent, deploys agent, metrics agent) yet: each hand-off
+loses context and adds latency and cost, and at 3am the bottleneck is a coherent story, not
+parallel reasoning. I would split when one of these becomes true: the tool catalog gets past
+~20-30 tools and selection quality drops, a single investigation no longer fits the context
+window, or a sub-task needs a different model (for example cheap log clustering).
+
+## What happens when an incident triggers
+
+The order follows "most likely to explain it, cheapest to fetch" first. Most production
+incidents are change-induced, so *what changed* comes right after *what is broken*.
+
+| # | Question | Source (MCP tool) | Who calls it | Notes |
+|---|---|---|---|---|
+| 0 | What fired, when, how urgent? | PagerDuty `get_incident` | prefetch | Gives service, alert, onset time. Onset time anchors every later query window. |
+| 1 | Who owns it, what does it depend on? | PagerDuty `get_service_context` | prefetch | Owners, on-call, upstream/downstream deps, runbook link. |
+| 2 | What changed recently? | VCS/CD `list_recent_changes` | prefetch | Deploys, config changes, feature-flag flips in `[onset - 2h, now]`. |
+| 3 | What else is alerting? | Datadog `list_triggered_monitors` | prefetch | Separates "my service is sick" from "the region is sick". |
+| 4 | How bad, since when? | Datadog `query_metrics` | agent | RED (rate, errors, duration) plus saturation (CPU, memory, DB pool). Look for a step change, not just a high value. |
+| 5 | What is the error? | Datadog `search_logs` | agent | Top error patterns, grouped, with **first-seen** time. A pattern first seen right after a deploy is strong evidence. |
+| 6 | Is it us or a dependency? | Datadog `get_dependency_health` (APM service map) | agent | Downstream error/latency. A sick dependency argues *against* rolling back. |
+| 7 | Have we seen this before? | PagerDuty `search_similar_incidents` | agent | Past incidents on this service with similar symptoms, and what fixed them. |
+| 8 | What does the team say to do? | `get_runbook` | agent | Approved remediations and their preconditions. |
+
+Rows 0-3 are always needed, so they are prefetched in parallel without the model. That saves
+three or four model round-trips (latency and tokens) before the responder sees anything useful.
+Rows 4-8 are model-chosen because which ones matter depends on what 0-3 showed.
+
+"Call logs" in two senses, both covered:
+- **Application/request logs** of the affected service: row 5.
+- **The agent's own tool-call log**: every call the executor makes is recorded with arguments,
+  latency, status and output size. That is the audit trail the responder (and we, when evaluating)
+  read afterwards.
+
+## From evidence to a decision
+
+The agent keeps a small set of competing hypotheses, each with evidence for and against.
+It is explicitly allowed to say "not enough evidence, here is what is missing".
+
+| Pattern in the evidence | Leading hypothesis | Proposed next step (needs approval) |
+|---|---|---|
+| Deploy/config change shortly before onset, new error pattern first seen after it, dependencies healthy | Bad change | `rollback_deploy` to the previous version |
+| Own changes quiet, a downstream dependency has elevated errors/latency, our errors are timeouts/5xx calling it | Dependency degradation | Runbook mitigation (for example `toggle_feature_flag` for a fallback path) and `page_team` for the dependency owner. **Do not roll back.** |
+| Request rate step-up, saturation (CPU, pool) climbing, no new error pattern | Capacity | `scale_out` |
+| Conflicting or missing evidence (a tool failed, signals disagree) | Unknown | No action. Report what is known, what is missing, and the single most useful thing a human could check. |
+
+Guardrails on any proposal:
+- The action must be in the catalog, with arguments that pass validation (for example the
+  rollback target must be a deploy that actually exists in the fetched change list).
+- It must cite evidence from tool results, not from the model's prior knowledge.
+- It is only ever **proposed**. The executor records it as `pending_approval` and tells the model
+  so. Nothing in this system can execute it.
+- Confidence is capped when any core data source failed.
+
+## When does the loop stop?
+
+1. The model calls the terminal tool `submit_assessment` (structured: summary, hypotheses,
+   recommended action, confidence, open questions).
+2. Budget exhausted (steps, tool calls, wall clock). We then **force** a final
+   `submit_assessment` with `tool_choice`, so the responder always gets a partial answer instead
+   of a timeout.
+3. Stall: the model keeps repeating identical calls. Treated like budget exhaustion.
+
+## Partial failure
+
+Tools fail at 3am too (Datadog rate limits, MCP server down). A failed tool returns a
+structured error as the tool message, the model is told the data is missing, and the final
+assessment must list it under open questions. The run never crashes because one source is down.
+
+## Multi-tenancy and safety in the tool layer
+
+- `tenant_id` is **not** a tool parameter. The model cannot choose it. The executor injects it
+  from the incident's authenticated context. Strict schemas (`additionalProperties: false`)
+  reject anything extra.
+- Each tool is tagged `read` or `approval_required` in the registry. That tag, not the prompt,
+  decides what happens when it is called.
+- Tool output is truncated to a fixed size so one noisy log query cannot blow the context.
+
+## Open questions to raise in the session
+
+- The brief refers to "the region-outage burst above", but the scenario text does not describe
+  it. Assumption for now: many incidents across many tenants at once, all pointing at a shared
+  cloud region.
+- How much past-incident history is there per tenant, and is it already labelled with root cause
+  and remediation, or would we have to extract that from free-text timelines?
+- Which remediations do customers actually pre-approve in practice? That decides how useful the
+  action catalog is.
