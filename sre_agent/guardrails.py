@@ -174,3 +174,38 @@ def screen(question: str, state: Any) -> Screen:
     if not _INCIDENT_VOCAB.search(text) and not any(t in text for t in incident_terms(state)):
         return blocked("off_topic")
     return Screen(True, "ok", None)
+
+
+# --- Layer 3: the answer, before anyone sees it ----------------------------------------------
+
+_SECRET_SHAPES = [
+    r"\bAKIA[0-9A-Z]{16}\b",  # AWS access key id
+    r"\bsk-[A-Za-z0-9_-]{20,}",  # API keys in the sk-... style
+    r"\bxox[abprs]-[A-Za-z0-9-]{10,}",  # Slack tokens
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"\b(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S{6,}",
+]
+LEAK_WINDOW_WORDS = 8  # this many consecutive words copied from our instructions counts as a leak
+
+ANSWER_BLOCKED = "I can't share that. Ask me about {incident}: status, impact, likely cause, or the proposed next step."
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", normalize(text))
+
+
+def filter_answer(answer: str, instructions: list[str]) -> tuple[bool, str | None]:
+    """(ok, reason). Blocks answers that quote our instructions, contain secret-shaped strings, or code,
+    whatever the question was. Catches what got past the input screen and the model's own judgement."""
+    words = _words(answer)
+    windows = {" ".join(words[i:i + LEAK_WINDOW_WORDS]) for i in range(len(words) - LEAK_WINDOW_WORDS + 1)}
+    for text in instructions:
+        w = _words(text)
+        if any(" ".join(w[i:i + LEAK_WINDOW_WORDS]) in windows for i in range(len(w) - LEAK_WINDOW_WORDS + 1)):
+            return False, "quotes the agent's instructions"
+    for rule in _SECRET_SHAPES:
+        if re.search(rule, answer, flags=re.IGNORECASE):
+            return False, "contains something shaped like a secret"
+    if "```" in answer:
+        return False, "contains code"
+    return True, None

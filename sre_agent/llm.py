@@ -58,6 +58,8 @@ class MockReasoningLLM:
         self._ids = itertools.count(1)
 
     def complete(self, messages, tools, tool_choice="auto"):
+        if str(messages[0].get("content") or "").startswith("You answer engineers' questions"):
+            return self._answer_question(messages)
         seen = _tool_results(messages)
         # After a failed fix, "have I done X yet?" only counts what happened since the re-investigate request.
         resumed_at = max((i for i, m in enumerate(messages) if str(m.get("content") or "").startswith("[re-investigate]")), default=None)
@@ -110,6 +112,41 @@ class MockReasoningLLM:
         if not forced and decision["proposals"] and not phase.called("propose_action"):
             return self._calls(decision["note"], [("propose_action", p) for p in decision["proposals"]])
         return self._calls(None, [("submit_assessment", decision["assessment"])])
+
+    def _answer_question(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """Question-answering mode: answer from the briefing; read a metric if asked about 'now'."""
+        user = messages[1]["content"]
+        b = json.loads(re.search(r"<incident_briefing>\n(.*)\n</incident_briefing>", user, re.S).group(1))
+        q = re.search(r"<question[^>]*>\n(.*)\n</question>", user, re.S).group(1).lower()
+        looked_up = [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
+        a, t = b["assessment"], b["triage"]
+
+        if re.search(r"error rate|right now|currently", q) and not looked_up:
+            return self._calls(None, [("datadog_query_metrics", {
+                "service_id": b["service_id"], "metric": "error_rate", "lookback_minutes": 10})])
+        if looked_up:
+            r = looked_up[-1]
+            text = (f"error_rate is {r['current']} right now, against a baseline of {r['baseline']}."
+                    if "current" in r else "I couldn't read the error rate just now.")
+        elif re.search(r"sev|severity|priority", q):
+            text = f"{t['severity']} / {t['priority']}, response mode {t['response_mode']}. " + " ".join(t["signals"])
+        elif re.search(r"\bwhy\b|cause|think|evidence|hypothes", q):
+            hyps = a.get("hypotheses") or []
+            text = (f"Leading hypothesis: {hyps[0]['cause']} ({hyps[0]['confidence']}). Evidence: "
+                    f"{'; '.join(hyps[0]['evidence_for'][:3])}.") if hyps else "No hypothesis yet."
+        elif re.search(r"customer|impact", q):
+            text = f"{(a.get('impact') or {}).get('scope', 'Impact unknown')}. " + " ".join(t["signals"][1:2])
+        elif re.search(r"chang|deploy|release", q):
+            text = "Recent changes: " + "; ".join(
+                f"{c['deploy_id']} {c['version']} at {c['at']} ({c['summary']})" for c in b["recent_changes"]
+            ) if b["recent_changes"] else "No recent changes recorded."
+        else:
+            hyps = a.get("hypotheses") or []
+            text = a.get("summary") or "No assessment yet."
+            if hyps:
+                text += f" Main evidence: {'; '.join(hyps[0]['evidence_for'][:2])}."
+        return {"object": "chat.completion", "model": self.model, "choices": [
+            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}]}
 
     def _calls(self, content: str | None, calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
         tool_calls = [

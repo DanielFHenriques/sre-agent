@@ -51,6 +51,13 @@ class Verification:
 
 
 @dataclass
+class Answer:
+    text: str
+    category: str  # "ok", or why it was not answered (a guardrails category, "off_topic_model", "output_blocked")
+    answered: bool
+
+
+@dataclass
 class ToolCallRecord:
     """One line of the agent's own call log (audit trail)."""
 
@@ -89,4 +96,5 @@ class AgentResult:
     cycle: int = 1  # 1 = first investigation, 2+ = re-investigation after a failed fix
     timeline: list[TimelineEntry] = field(default_factory=list)
     triage: dict[str, Any] | None = None  # severity, priority, response mode; see triage.py
+    questions: list[dict[str, Any]] = field(default_factory=list)  # engineers' questions + guardrail verdicts (audit)
     version: int = 0  # bumped on every save; used to detect two writers (optimistic concurrency)

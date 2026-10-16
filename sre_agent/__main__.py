@@ -130,6 +130,9 @@ def main() -> None:
     parser.add_argument("--recover", action="store_true",
                         help="load the incident from --state-dir and continue where it stopped")
     parser.add_argument("--handover-to", help="hand the incident over to this person and print the brief")
+    parser.add_argument("--ask", action="append", default=[],
+                        help="ask the agent a question about the incident (repeatable); goes through guardrails")
+    parser.add_argument("--asked-by", default="engineer@acme.example")
     parser.add_argument("--json", action="store_true", help="dump the full OpenAI-format transcript")
     args = parser.parse_args()
     if (args.crash_after_steps or args.recover) and not args.state_dir:
@@ -192,6 +195,11 @@ def main() -> None:
         print("\nTIMELINE:")
         for t in result.timeline:
             print(f"  {t.at}  [{t.actor}] {t.text}")
+
+    for question in args.ask:
+        answer = agent.ask(incident, result, question, args.asked_by)
+        tag = "ANSWER" if answer.answered else f"NOT ANSWERED ({answer.category})"
+        print(f"\nQ ({args.asked_by}): {question}\n{tag}: {answer.text}")
 
     print("\nTOOL CALL LOG (all cycles):")
     for r in result.tool_log:

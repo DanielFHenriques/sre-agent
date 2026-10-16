@@ -14,13 +14,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from sre_agent.llm import LLMClient
-from sre_agent.models import AgentResult, IncidentRef, TimelineEntry, Verification
-from sre_agent.prompts import SYSTEM_PROMPT
+from sre_agent.guardrails import ANSWER_BLOCKED, REPLIES, filter_answer, screen
+from sre_agent.models import AgentResult, Answer, IncidentRef, SideEffect, TimelineEntry, Verification
+from sre_agent.prompts import QA_PROMPT, SYSTEM_PROMPT
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import Now, investigation_entries, proposal_entry, utc_now
 from sre_agent.triage import raise_only, summary as triage_summary, triage
 from sre_agent.tools.executor import MCPClient, ToolExecutor
-from sre_agent.tools.registry import openai_tools
+from sre_agent.tools.registry import REGISTRY, openai_tools
 
 FORCE_ASSESSMENT = {"type": "function", "function": {"name": "submit_assessment"}}
 
@@ -224,6 +225,61 @@ class SREAgent:
             return self._finish(incident, state, executor, assessment, "assessment_submitted", None)
         return self._investigate(incident, state, executor, set(), started, previous_assessment=None)
 
+    def ask(self, incident: IncidentRef, state: AgentResult, question: str, asked_by: str) -> Answer:
+        """Answer an engineer's question about this incident, behind three guardrail layers.
+
+        1. `screen`: deterministic checks before any model call.
+        2. Structure: a fresh thread per question (never the investigation transcript), the incident as
+           data, read-only tools offered *and* enforced by the executor. Nothing here can propose,
+           approve or execute an action, or change what the investigation sees.
+        3. `filter_answer`: the answer is checked before it is returned.
+        Every question is recorded on the incident with its verdict.
+        """
+        verdict = screen(question, state)
+        record = {"at": self.now(), "asked_by": asked_by, "question": question[:500],
+                  "category": verdict.category, "matched": verdict.matched}
+        state.questions.append(record)
+        if not verdict.allowed:
+            self._checkpoint(incident, state)
+            return Answer(verdict.reply or "", verdict.category, False)
+
+        qa_prompt = QA_PROMPT.format(incident_id=incident.incident_id)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": qa_prompt},
+            {"role": "user", "content": (
+                f"<incident_briefing>\n{json.dumps(briefing(state, incident), indent=1)}\n</incident_briefing>\n"
+                f"<question from=\"{asked_by}\">\n{question}\n</question>"
+            )},
+        ]
+        read_only = {name for name, t in REGISTRY.items() if t.side_effect is SideEffect.READ}
+        executor = ToolExecutor(self.mcp, incident, allowed_tools=read_only)
+        tools = [t for t in openai_tools() if t["function"]["name"] in read_only]
+        text = None
+        for _ in range(3):  # a question gets a few read-only lookups, not an investigation
+            message = self._complete(messages, tools)
+            messages.append(message)
+            if not message.get("tool_calls"):
+                text = (message.get("content") or "").strip()
+                break
+            for call in message["tool_calls"]:
+                result = executor.execute(call["function"]["name"], call["function"]["arguments"])
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result)})
+        if not text:
+            text = f"I couldn't answer that within my limits. The current assessment of {incident.incident_id} is in the brief."
+
+        if text == "OUT_OF_SCOPE":
+            record["category"] = "off_topic_model"
+            answer = Answer(REPLIES["off_topic"].format(incident=incident.incident_id), "off_topic_model", False)
+        else:
+            ok, reason = filter_answer(text, [SYSTEM_PROMPT, qa_prompt])
+            if ok:
+                answer = Answer(text, "ok", True)
+            else:
+                record["category"], record["matched"] = "output_blocked", reason
+                answer = Answer(ANSWER_BLOCKED.format(incident=incident.incident_id), "output_blocked", False)
+        self._checkpoint(incident, state)
+        return answer
+
     # -------------------------------------------------------------------------------------------
 
     def _executor(self, incident: IncidentRef, state: AgentResult) -> ToolExecutor:
@@ -401,4 +457,29 @@ def _escalation(previous: AgentResult, verification: Verification) -> dict[str, 
         "recommended_next_step": "Escalate to the owning team's senior on-call. Fixes already tried: " + "; ".join(tried),
         "confidence": "low",
         "open_questions": [f"Why did {verification.action} not help? {verification.detail}"],
+    }
+
+
+def briefing(state: AgentResult, incident: IncidentRef) -> dict[str, Any]:
+    """What a question is answered from: the current picture, not the raw investigation transcript."""
+    changes: list[dict[str, Any]] = []
+    for m in state.messages:
+        if m["role"] == "tool" and '"changes"' in str(m.get("content")):
+            try:
+                changes = json.loads(m["content"]).get("changes", changes)
+            except json.JSONDecodeError:
+                pass
+    a = state.assessment or {}
+    return {
+        "incident_id": incident.incident_id,
+        "service_id": incident.service_id,
+        "triage": {k: (state.triage or {}).get(k) for k in ("severity", "priority", "response_mode", "customer_facing", "signals")},
+        "assessment": {k: a.get(k) for k in ("summary", "impact", "hypotheses", "recommended_next_step", "confidence", "open_questions")},
+        "proposals": [
+            {"action": p.action, "params": p.params, "status": p.status, "risk": p.risk,
+             "verification": p.verification_verdict, "fast_track": p.fast_track}
+            for p in state.proposed_actions
+        ],
+        "recent_changes": changes,
+        "timeline": [f"{t.at} [{t.actor}] {t.text}" for t in state.timeline[-15:]],
     }

@@ -43,11 +43,14 @@ class ToolExecutor:
         transcript: list[dict[str, Any]] | None = None,
         prior_proposals: list[ProposedAction] | None = None,
         prior_log: list[ToolCallRecord] | None = None,
+        allowed_tools: set[str] | None = None,
     ):
         self.mcp = mcp
         self.incident = incident
         self.max_output_chars = max_output_chars
         self.clock = clock
+        # None = every registered tool. The question-answering path passes only the read tools.
+        self.allowed_tools = allowed_tools
         # The prior_* arguments let a resumed investigation carry forward what this incident already tried.
         self.proposed_actions: list[ProposedAction] = list(prior_proposals or [])
         self.log: list[ToolCallRecord] = list(prior_log or [])
@@ -73,6 +76,8 @@ class ToolExecutor:
             tool = REGISTRY.get(name)
             if tool is None:
                 raise ToolRejected(f"unknown tool '{name}'")
+            if self.allowed_tools is not None and name not in self.allowed_tools:
+                raise ToolRejected(f"'{name}' is not available here")
             try:
                 args = json.loads(raw_arguments or "{}")
             except json.JSONDecodeError as e:
