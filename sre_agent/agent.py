@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from sre_agent.llm import LLMClient
+from sre_agent.coverage import coverage, summary as coverage_summary
 from sre_agent.guardrails import ANSWER_BLOCKED, REPLIES, filter_answer, screen
 from sre_agent.models import AgentResult, Answer, IncidentRef, SideEffect, TimelineEntry, Verification
 from sre_agent.prompts import QA_PROMPT, SYSTEM_PROMPT
@@ -118,17 +119,23 @@ class SREAgent:
         )
 
         # Triage, no model: severity and priority from data, before anyone reasons about causes.
+        cov = coverage(executor.router)
         state.triage = executor.triage = triage(
-            seen.get("pagerduty_get_incident", {}), seen.get("business_kpi"), seen.get("support_cases_search")
+            seen.get("pagerduty_get_incident", {}), seen.get("business_kpi"), seen.get("support_cases_search"), cov
         )
         state.timeline.append(TimelineEntry(
             self.now(), "triage", f"Triage: {triage_summary(state.triage)} {' '.join(state.triage['signals'])}", "agent",
+        ))
+        state.timeline.append(TimelineEntry(
+            self.now(), "coverage", f"{coverage_summary(cov)} {' '.join(cov['limits'])}".strip(), "agent",
         ))
         self._append(state.messages, {
             "role": "user",
             "content": f"[triage] {triage_summary(state.triage)} Signals: {' '.join(state.triage['signals'])} "
             "This severity was set from data. If your investigation shows the impact is worse, say so in "
-            "impact.suggested_severity; it can be raised, never lowered.",
+            "impact.suggested_severity; it can be raised, never lowered.\n"
+            f"[coverage] {coverage_summary(cov)} {' '.join(cov['limits'])} You only have tools for what this "
+            "service has integrated. Say plainly in open_questions what you could not check because of it.",
         })
         self._checkpoint(incident, state)
 
@@ -505,6 +512,7 @@ def briefing(state: AgentResult, incident: IncidentRef) -> dict[str, Any]:
         "incident_id": incident.incident_id,
         "service_id": incident.service_id,
         "triage": {k: (state.triage or {}).get(k) for k in ("severity", "priority", "response_mode", "customer_facing", "signals")},
+        "coverage": ((state.triage or {}).get("coverage") or {}),
         "assessment": {k: a.get(k) for k in ("summary", "impact", "hypotheses", "recommended_next_step", "confidence", "open_questions")},
         "proposals": [
             {"action": p.action, "params": p.params, "status": p.status, "risk": p.risk,

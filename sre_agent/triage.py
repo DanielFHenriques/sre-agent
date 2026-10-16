@@ -60,8 +60,10 @@ def triage(
     incident: dict[str, Any],
     kpi: dict[str, Any] | None,
     cases: dict[str, Any] | None,
+    coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = cases_status(cases)
+    no_metrics = coverage is not None and "metrics" in coverage["missing"]
     signals: list[str] = []
 
     # 1. Business impact.
@@ -70,6 +72,10 @@ def triage(
         kpi_change = round((kpi["current"] - kpi["baseline"]) / kpi["baseline"] * 100, 1)
         severity = severity_from_kpi(kpi_change)
         signals.append(f"Business KPI {kpi_change:+.1f}% vs baseline ({kpi['baseline']} -> {kpi['current']}): {severity}.")
+    elif no_metrics:
+        severity = "SEV-3"
+        signals.append("No metrics integration for this service: impact can't be measured, so severity comes from "
+                       "customer reports, otherwise SEV-3.")
     else:
         severity = "SEV-3"
         signals.append("Business KPI unavailable: defaulting to SEV-3 until impact is known.")
@@ -105,6 +111,7 @@ def triage(
         "kpi_change_pct": kpi_change,
         "urgency": incident.get("urgency", "unknown"),
         "signals": signals,
+        "coverage": coverage,
     })
 
 

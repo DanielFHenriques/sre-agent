@@ -337,9 +337,27 @@ So the client's integrations decide what the agent can do, not just where data c
   use yet (here LaunchDarkly) are recorded as `unsupported`. Counted across tenants, that is the
   backlog for which connector to build next.
 
-Next: show coverage to the responder and limit proposals by it; integration health (a broken
-connection is "unavailable", reported to the client); failover only between the client's own
-integrations.
+**Coverage** (`coverage.py`) comes from the same router, never from the model. It is computed at
+triage and shown wherever a person or the model reads: the transcript, timeline, CLI, question
+briefing and handover. For example:
+*"Agent coverage: metrics NO, logs yes, dependency tracing NO, alerts NO, change tracking yes,
+support cases yes."* Each gap says what it means in practice, and the executor enforces the limits:
+
+| Missing | Consequence |
+|---|---|
+| Metrics | Severity from customer reports, else SEV-3. **No fix proposals**: none could be verified. It investigates, advises, pages |
+| Change tracking | No rollbacks: it can't target a deploy it never saw |
+| Logs | No error signatures: it can't tie errors to a change or use memory |
+| Dependency tracing | It can't rule a dependency in or out |
+| Alerts | It can't tell a local problem from a wider one |
+| Support cases | Customer impact is unknown, so a low severity never counts as "low" |
+
+In `logs_only`, the agent still finds the likely deploy from logs and changes, says so with medium
+confidence, and leaves the rollback to the Incident Commander with a way to confirm recovery
+(error logs, new support cases). It doesn't propose a fix it can't check.
+
+Next: integration health (a broken connection is "unavailable", reported to the client) and
+failover only between the client's own integrations.
 
 ## Open questions to raise in the session
 

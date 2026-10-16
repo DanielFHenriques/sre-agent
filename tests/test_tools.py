@@ -177,7 +177,9 @@ class ExecutorTest(unittest.TestCase):
 
     def test_baselines_rebuilt_from_transcript(self):
         """A resumed or recovered executor must keep the check, not start from a blank slate."""
-        transcript = [{"role": "tool", "tool_call_id": "x", "content": json.dumps(
+        integrations = MockMCPClient("bad_deploy").data["pagerduty_list_service_integrations"]
+        transcript = [{"role": "tool", "tool_call_id": "i", "content": json.dumps(integrations)},
+                      {"role": "tool", "tool_call_id": "x", "content": json.dumps(
             {"metric": "error_rate", "baseline": 0.004, "current": 0.21, "change_point": None})},
             {"role": "tool", "tool_call_id": "y", "content": json.dumps(
             {"changes": [{"deploy_id": "dep-7731"}]})}]

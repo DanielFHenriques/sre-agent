@@ -460,3 +460,13 @@ EFFECTS["low_sev_recurring"] = {
 # is identical; only the connector and the vendor's query language and response shapes differ.
 SCENARIOS["bad_deploy_newrelic"] = {**SCENARIOS["bad_deploy"], "pagerduty_list_service_integrations": _NEWRELIC_INTEGRATIONS}
 EFFECTS["bad_deploy_newrelic"] = EFFECTS["bad_deploy"]
+
+
+# A client that only sends this service's logs (plus deploys and support cases): no metrics, no tracing,
+# no alerts. The agent can still investigate and advise, but can't measure impact or verify a fix.
+SCENARIOS["logs_only"] = {
+    **SCENARIOS["bad_deploy"],
+    "pagerduty_list_service_integrations": {"integrations": [{"vendor": "datadog", "provides": ["logs"], "config": {}}, *_REST]},
+    "salesforce_search_cases": _cases(6, "Checkout shows an error after entering card details", enterprise=0),
+}
+EFFECTS["logs_only"] = EFFECTS["bad_deploy"]

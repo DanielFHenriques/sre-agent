@@ -76,8 +76,12 @@ class MockReasoningLLM:
         incident = seen.latest("pagerduty_get_incident") or {}
         service = incident.get("service_id", "unknown")
         window = 30
+        # Like a real model, only use the tools it is offered (only what the service has integrated).
+        offered = {t["function"]["name"] for t in tools}
+        # The first wave's own reads (prefetch already read some metrics, so "any metric read" isn't a signal).
+        wave1_done = phase.called("logs_search") or phase.called("dependency_health") or phase.metric("latency_p99")
 
-        if not forced and not phase.called("logs_search"):
+        if not forced and offered & {"metrics_query", "logs_search", "dependency_health"} and not wave1_done:
             wider = [
                 ("metrics_query", {"service_id": service, "metric": m, "lookback_minutes": window})
                 for m in ("request_rate", "db_pool_usage", "cpu")
@@ -88,16 +92,17 @@ class MockReasoningLLM:
                 for m in ("business_kpi", "error_rate")
                 if resumed_at is not None or seen.metric(m) is None
             ]
+            calls = wider + impact_reads + [
+                ("metrics_query", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
+                ("logs_search", {"service_id": service, "level": "error", "query": None, "lookback_minutes": window}),
+                ("dependency_health", {"service_id": service}),
+            ]
             return self._calls(
                 f"{', '.join(sorted(tried))} did not fix it, so my first hypothesis was wrong. Re-reading everything "
                 "fresh and looking wider: traffic and saturation too."
                 if resumed_at is not None
-                else "Triage is done. Checking the latency trend, error logs, and dependency health in parallel.",
-                wider + impact_reads + [
-                    ("metrics_query", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
-                    ("logs_search", {"service_id": service, "level": "error", "query": None, "lookback_minutes": window}),
-                    ("dependency_health", {"service_id": service}),
-                ],
+                else "Triage is done. Checking what this service's integrations let me see, in parallel.",
+                [c for c in calls if c[0] in offered],
             )
 
         if not forced and not phase.called("runbook_get"):
@@ -119,7 +124,7 @@ class MockReasoningLLM:
         memories = (phase.latest("memory_recall") or {}).get("memories", [])
         hint = next((m for m in memories if any(w.startswith("scale_out") for w in m["worked"])
                      or any(d.startswith("rollback_deploy") for d in m["did_not_work"])), None)
-        if not forced and hint and seen.metric("db_pool_usage") is None:
+        if not forced and hint and "metrics_query" in offered and seen.metric("db_pool_usage") is None:
             return self._calls(
                 f"Memory {hint['incident_id']} ({hint['similarity']:.0%} similar): with these symptoms, "
                 f"{'; '.join(hint['did_not_work']) or 'nothing'} did not help and {'; '.join(hint['worked'])} did. "
@@ -128,7 +133,7 @@ class MockReasoningLLM:
                  for m in ("request_rate", "db_pool_usage", "cpu")],
             )
 
-        decision = _decide(seen, incident, tried, memories)
+        decision = _decide(seen, incident, tried, memories, can_measure="metrics_query" in offered)
         if not forced and decision["proposals"] and not phase.called("propose_action"):
             return self._calls(decision["note"], [("propose_action", p) for p in decision["proposals"]])
         return self._calls(None, [("submit_assessment", decision["assessment"])])
@@ -222,7 +227,7 @@ def _tool_results(messages: list[dict[str, Any]], since: int = 0) -> _Seen:
 
 
 def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset(),
-            memories: list[dict[str, Any]] = ()) -> dict[str, Any]:
+            memories: list[dict[str, Any]] = (), can_measure: bool = True) -> dict[str, Any]:
     service = incident.get("service_id", "unknown")
     onset = _ts(incident["onset_estimate"]) if "onset_estimate" in incident else None
     failed = seen.failed()
@@ -387,6 +392,22 @@ def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()
             })
         next_step = "Do not roll back. Approve the fallback flag and page the dependency owner."
         note = f"{dep['service']} is failing, not us. Proposing the runbook mitigation instead of a rollback."
+    elif suspect and new_patterns and not can_measure:
+        # Logs and changes point at the deploy, but with no metrics no fix can be verified, so no proposal: advise.
+        evidence = [f"Deploy {suspect['deploy_id']} ({suspect['version']}) at {suspect['at']}, onset {incident['onset_estimate']}"]
+        evidence += [f"New error pattern first seen {p['first_seen']}: {p['template']}" for p in new_patterns]
+        hypotheses.append({
+            "cause": f"Bad deploy {suspect['version']}",
+            "confidence": "medium",
+            "evidence_for": evidence,
+            "evidence_against": ["Without metrics, impact and recovery can't be measured",
+                                 "Without dependency tracing, a dependency fault can't be ruled out"],
+        })
+        next_step = (f"Most likely the deploy {suspect['deploy_id']} ({suspect['version']}). I can't propose or verify a "
+                     f"rollback for this service: it has no metrics integration. If the Incident Commander rolls back "
+                     f"to {suspect['previous_version']}, confirm recovery from the error logs and new support cases.")
+        note = ""
+        open_questions.append("Is the error rate actually recovering? This service has no metrics integration to check.")
     elif tried:
         next_step = f"Already tried without effect: {', '.join(sorted(tried))}. No new evidence-backed fix; escalate."
         note = ""

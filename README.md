@@ -26,6 +26,7 @@ Python 3.11+, standard library only.
 py -m sre_agent --scenario bad_deploy
 py -m sre_agent --scenario dependency_outage --approve 1,2
 py -m sre_agent --scenario bad_deploy_newrelic --approve 1               # same incident, client uses New Relic
+py -m sre_agent --scenario logs_only                                     # client sends logs but no metrics: advise only
 py -m sre_agent --scenario bad_deploy --fail datadog_search_logs        # a tool times out
 py -m sre_agent --scenario deploy_red_herring --approve 1 --approve 1   # first fix fails, agent re-investigates
 py -m sre_agent --scenario low_sev_recurring --approve 1 --approver bob # SEV-4, fast-tracked; any responder may approve
@@ -73,6 +74,7 @@ responses.
 | `dependency_outage` | payments-gateway is failing; no recent change | Does **not** roll back. Proposes the runbook's fallback flag and pages the owning team |
 | `deploy_red_herring` | A harmless deploy lands just before a traffic spike exhausts the DB pool | Confidently proposes a rollback, which fails verification. Re-investigates wider, finds saturation, proposes scale-out, which passes |
 | `bad_deploy_newrelic` | `bad_deploy` for a client on New Relic instead of Datadog | Exactly the same outcome; only the connector, the query language (NRQL) and the response shapes differ |
+| `logs_only` | `bad_deploy` for a client who only integrated logs, deploys and support cases | Says up front what it can't see. Still finds the likely deploy from logs and changes, but proposes nothing: with no metrics it couldn't verify a fix. It advises the Incident Commander instead |
 | `low_sev_recurring` | A release breaks the gift-card endpoint again: KPI -0.9%, no customer cases, and the same rollback fixed it twice before | Triage says SEV-4 / low; the rollback is offered as a **fast-track**, one-click approval that any responder can give |
 
 `deploy_red_herring` is deliberate: it shows the agent being wrong in the most plausible way, and
@@ -94,6 +96,11 @@ what contains the damage.
    - **low** (SEV-4/5, and we know customers aren't reporting it): lean investigation.
 
    Investigation can raise severity later, never lower it.
+
+   Triage also reports **coverage**: what the agent can and can't see for this service, given the
+   client's integrations, and what each gap means. For example, no metrics means no fix proposals,
+   because none could be verified; no change tracking means no rollbacks. Coverage goes into the
+   transcript, timeline, question briefing and handover, and the executor enforces the limits.
 3. **Loop.** The model is offered only the capabilities this service has integrated, and picks tools (metrics with the business KPI first, grouped error logs,
    dependency health, similar past incidents, the runbook) until it calls `submit_assessment`.
    Budgets on steps, tool calls and wall clock, plus stall detection. If any budget runs out, the
@@ -198,7 +205,7 @@ Mine. Each would be a question for the team:
 | **A model-based scope check** | Regex plus a structural boundary first | A small, cheap classifier ahead of the answering model for questions that pass the regex but are off-topic or adversarial in ways regex can't see (other languages, paraphrase) |
 | **Posting to Slack or Teams** | One surface, CLI | Post timeline entries as they happen. Not every tool call: too-frequent updates are an anti-pattern in PagerDuty's guidance |
 | **Multiple languages** | Out of time | The model reasons in English over tool data. Translate only what humans read (summary, proposals, brief) at the edge, and keep identifiers and metric names untranslated |
-| **Coverage shown to the responder, and integration health** | Next commits | Tell the responder up front what the agent can and can't see for this service, limit what it may propose accordingly, and treat a broken connection (expired token, revoked access) as unavailable, reported to the client, with failover only between the client's own integrations |
+| **Integration health** | Next commit | Treat a broken connection (expired token, revoked access) as unavailable rather than "no data", report it to the client, and fail over only between the client's own integrations |
 
 ## Where it breaks first
 
@@ -321,6 +328,7 @@ exceeds the context window or becomes slow and expensive per step.
 |---|---|
 | `sre_agent/tools/specs.py` | OpenAI strict function schemas for every tool |
 | `sre_agent/connectors.py` | One connector per vendor (Datadog, New Relic, GitHub Actions, Salesforce) and the per-service router built from integrations |
+| `sre_agent/coverage.py` | What the agent can see for a service, what each gap means, and which actions each gap blocks |
 | `sre_agent/tools/registry.py` | Tool -> side effect (read / approval_required / terminal) -> MCP server |
 | `sre_agent/tools/executor.py` | Policy gate: validation, tenant injection, timeouts, proposal checks, truncation, call log |
 | `sre_agent/agent.py` | Core loop: prefetch, model <-> tools, budgets, stall detection, forced answer, resume, recover, checkpoints |
@@ -332,7 +340,7 @@ exceeds the context window or becomes slow and expensive per step.
 | `sre_agent/state.py` | Persisted incident state: tenant-scoped keys, atomic writes, version check |
 | `sre_agent/timeline.py` | Scribe timeline written by code, and the handover brief |
 | `sre_agent/mocks/` | Four scenarios, the mock MCP servers (incl. Salesforce), and what each action changes |
-| `tests/` | 122 tests: schemas, executor checks, scenarios, triage, fast-track, guardrails, approvals, verification, re-investigation, state and recovery |
+| `tests/` | 130 tests: schemas, executor checks, scenarios, triage, fast-track, guardrails, approvals, verification, re-investigation, state and recovery |
 
 ## Reading the history
 
@@ -357,4 +365,5 @@ The commits are meant to be reviewed in order:
 17. `deabe42` only assigned responders approve; the Incident Commander in a major incident
 18. `1949fd4` README and design update for the above
 19. `1689c44` cross-incident memory
-20. integration-agnostic capability tools, connectors per vendor, routing by the service's integrations
+20. `3543a86` integration-agnostic capability tools, connectors per vendor, routing by the service's integrations
+21. coverage: what the agent can see per service, shown up front, and limiting what it may propose

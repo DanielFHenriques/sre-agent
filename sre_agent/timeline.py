@@ -73,6 +73,11 @@ def handover_brief(result: AgentResult, from_who: str, to_who: str) -> str:
         f"Impact: {impact.get('scope', 'unknown')}. Suggested severity {impact.get('suggested_severity', 'unknown')}.",
         f"Current read: {a.get('summary', 'no assessment yet')}",
     ]
+    cov = (result.triage or {}).get("coverage")
+    if cov:
+        from sre_agent.coverage import summary as coverage_summary  # local: coverage imports nothing from here
+        lines.append(coverage_summary(cov))
+        lines += [f"  Limit: {limit}" for limit in cov["limits"]]
     if hypotheses:
         lines.append(f"Leading hypothesis: {hypotheses[0]['cause']} ({hypotheses[0]['confidence']}).")
         for h in hypotheses[1:]:

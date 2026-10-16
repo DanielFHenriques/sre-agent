@@ -15,6 +15,7 @@ import time
 from typing import Any, Callable
 
 from sre_agent.connectors import ConnectorError, Router
+from sre_agent.coverage import LABELS, LIMITS, blocked_by
 from sre_agent.models import IncidentRef, ProposedAction, SideEffect, ToolCallRecord
 from sre_agent.tools.executor_types import MCPClient
 from sre_agent.tools.registry import REGISTRY
@@ -179,6 +180,15 @@ class ToolExecutor:
             )
         if not args["evidence"]:
             raise ToolRejected("a proposal must cite at least one piece of evidence from tool results")
+
+        # Coverage limits what can be proposed at all: a fix the agent can't verify, it doesn't propose.
+        lacking = blocked_by(action, self.router.covered() if self.router else set())
+        if lacking:
+            raise ToolRejected(
+                f"{action} isn't possible for {self.incident.service_id}: no integration for "
+                f"{', '.join(LABELS[c] for c in lacking)}. {LIMITS[lacking[0]]} Advise the responder in your "
+                "assessment instead, or propose page_team."
+            )
 
         needed = {
             "rollback_deploy": ["deploy_id"],

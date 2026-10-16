@@ -32,6 +32,7 @@ from sre_agent.remediation import ApprovalPolicy, NotAuthorized, Remediator
 from sre_agent.memory import FileMemoryStore
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import handover_brief, utc_now
+from sre_agent.coverage import summary as coverage_summary
 from sre_agent.triage import summary as triage_summary
 
 
@@ -81,6 +82,10 @@ def print_result(result: AgentResult) -> None:
         for s in t["signals"]:
             print(f"          - {s}")
         print(f"          {t['recommendation']}")
+        if t.get("coverage"):
+            print(f"  COVERAGE {coverage_summary(t['coverage'])}")
+            for limit in t["coverage"]["limits"]:
+                print(f"          - {limit}")
     print(f"  {a.get('summary')}")
     impact = a.get("impact") or {}
     if impact:
