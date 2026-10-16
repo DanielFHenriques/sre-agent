@@ -45,7 +45,7 @@ class AgentScenarioTest(unittest.TestCase):
         result, _ = run("bad_deploy", failing={"datadog_search_logs"})
         self.assertEqual(result.stop_reason, "assessment_submitted")
         self.assertEqual(result.assessment["confidence"], "medium")
-        self.assertTrue(any("datadog_search_logs" in q for q in result.assessment["open_questions"]))
+        self.assertTrue(any("logs_search" in q for q in result.assessment["open_questions"]))
 
     def test_dependency_data_down_means_no_action(self):
         result, _ = run("bad_deploy", failing={"datadog_get_dependency_health"})

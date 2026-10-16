@@ -58,16 +58,16 @@ def prefetch_signals(
     has = (lambda capability: capability in provides) if "integrations" in integrations else (lambda _: True)
     calls: list[tuple[str, dict[str, Any]]] = []
     if has("deploys"):
-        calls.append(("changes_list_recent", {"service_id": svc, "lookback_minutes": 180}))
+        calls.append(("changes_list", {"service_id": svc, "lookback_minutes": 180}))
     if has("monitors"):
-        calls.append(("datadog_list_triggered_monitors", {"service_id": svc}))
+        calls.append(("alerts_list", {"service_id": svc}))
     if has("metrics"):
         calls += [
-            ("datadog_query_metrics", {"service_id": svc, "metric": "business_kpi", "lookback_minutes": 30}),
-            ("datadog_query_metrics", {"service_id": svc, "metric": "error_rate", "lookback_minutes": 30}),
+            ("metrics_query", {"service_id": svc, "metric": "business_kpi", "lookback_minutes": 30}),
+            ("metrics_query", {"service_id": svc, "metric": "error_rate", "lookback_minutes": 30}),
         ]
     if has("support_cases") and "onset_estimate" in details:
-        calls.append(("salesforce_search_cases", {"service_id": svc, "since": details["onset_estimate"]}))
+        calls.append(("support_cases_search", {"service_id": svc, "since": details["onset_estimate"]}))
     return calls
 
 
@@ -119,7 +119,7 @@ class SREAgent:
 
         # Triage, no model: severity and priority from data, before anyone reasons about causes.
         state.triage = executor.triage = triage(
-            seen.get("pagerduty_get_incident", {}), seen.get("business_kpi"), seen.get("salesforce_search_cases")
+            seen.get("pagerduty_get_incident", {}), seen.get("business_kpi"), seen.get("support_cases_search")
         )
         state.timeline.append(TimelineEntry(
             self.now(), "triage", f"Triage: {triage_summary(state.triage)} {' '.join(state.triage['signals'])}", "agent",
@@ -255,8 +255,9 @@ class SREAgent:
             )},
         ]
         read_only = {name for name, t in REGISTRY.items() if t.side_effect is SideEffect.READ}
-        executor = ToolExecutor(self.mcp, incident, allowed_tools=read_only, local_servers=self._local_servers(), now=self.now)
-        tools = [t for t in self._tools() if t["function"]["name"] in read_only]
+        executor = ToolExecutor(self.mcp, incident, transcript=state.messages, allowed_tools=read_only,
+                                local_servers=self._local_servers(), now=self.now)
+        tools = [t for t in self._tools(executor) if t["function"]["name"] in read_only]
         text = None
         for _ in range(3):  # a question gets a few read-only lookups, not an investigation
             message = self._complete(messages, tools)
@@ -304,9 +305,11 @@ class SREAgent:
     def _local_servers(self) -> dict[str, Any]:
         return {"agent_memory": self.memory} if self.memory is not None else {}
 
-    def _tools(self) -> list[dict[str, Any]]:
-        """Tools offered to the model. Memory recall only when there is a memory to recall from."""
-        return [t for t in openai_tools() if self.memory is not None or t["function"]["name"] != "memory_recall"]
+    def _tools(self, executor: ToolExecutor) -> list[dict[str, Any]]:
+        """Tools offered to the model: only capabilities this service has an integration for (none if its
+        integrations couldn't be read), and memory recall only when there is a memory to recall from."""
+        covered = executor.router.covered() if executor.router else set()
+        return [t for t in openai_tools(covered) if self.memory is not None or t["function"]["name"] != "memory_recall"]
 
     def _executor(self, incident: IncidentRef, state: AgentResult) -> ToolExecutor:
         """An executor that knows what this incident has already seen and tried, sharing state's lists."""
@@ -326,7 +329,7 @@ class SREAgent:
 
     def _investigate(self, incident, state: AgentResult, executor: ToolExecutor, signatures, started,
                      previous_assessment) -> AgentResult:
-        tools = self._tools()
+        tools = self._tools(executor)
         messages = state.messages
         calls_before = len(executor.log)
         stalled, assessment = 0, None
@@ -373,7 +376,7 @@ class SREAgent:
 
     def _finish(self, incident, state: AgentResult, executor, assessment, stop_reason, previous_assessment) -> AgentResult:
         if assessment is None:
-            assessment = self._force_assessment(stop_reason, state.messages, self._tools(), executor)
+            assessment = self._force_assessment(stop_reason, state.messages, self._tools(executor), executor)
         state.assessment = assessment
         state.stop_reason = stop_reason
         state.timeline.extend(investigation_entries(self.now(), previous_assessment, assessment, stop_reason, state.cycle))

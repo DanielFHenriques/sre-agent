@@ -313,6 +313,34 @@ decided by our own code, which makes them more trustworthy than a free-text labe
 **Correcting it.** `retract` keeps the record for audit but never recalls it. Records decay, and
 each service keeps at most 200.
 
+## Integrations and connectors
+
+The agent works for many clients, and it can only see what each client has connected to the service.
+So the client's integrations decide what the agent can do, not just where data comes from.
+
+- **Capabilities, not vendors.** The model's tools are `metrics_query`, `logs_search`,
+  `dependency_health`, `alerts_list`, `changes_list` and `support_cases_search`. The prompt and tool
+  descriptions never name a vendor (a test enforces this).
+- **A connector per vendor** (`connectors.py`) translates a capability call into that vendor's MCP
+  tool and query language, and normalizes the answer back into one shape, tagged with its `source`.
+  New Relic is there to prove it: NRQL in, its own result shapes out, and the same incident reaches
+  the same conclusion as on Datadog.
+- **The client's configuration** comes with the integration: which query is *their* business KPI,
+  error rate and so on. A capability with no mapping is reported as `not_mapped`, not guessed.
+- **Routing per service.** A router is built from the service's integrations, in the client's
+  order; the first one providing a capability answers it. The model is offered only covered
+  capabilities. An uncovered capability returns `not_integrated`, and if the integrations can't be
+  read, no capability tools are offered at all.
+- **Everything else is vendor-blind.** Triage, verification, memory and guardrails work on the
+  normalized shapes, so they are unchanged. Verification routes through the same integrations.
+- **Growing the ecosystem** means one connector class per vendor. Integrations we list but can't
+  use yet (here LaunchDarkly) are recorded as `unsupported`. Counted across tenants, that is the
+  backlog for which connector to build next.
+
+Next: show coverage to the responder and limit proposals by it; integration health (a broken
+connection is "unavailable", reported to the client); failover only between the client's own
+integrations.
+
 ## Open questions to raise in the session
 
 - The brief refers to "the region-outage burst above", but the scenario text does not describe

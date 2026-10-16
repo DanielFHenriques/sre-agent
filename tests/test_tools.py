@@ -11,6 +11,11 @@ from sre_agent.tools.registry import openai_tools
 INCIDENT = IncidentRef("PD-1001", TENANT, SERVICE)
 
 
+def connect(executor):
+    """Read the service's integrations, as prefetch does, so capability tools can be routed."""
+    executor.execute("pagerduty_list_service_integrations", json.dumps({"service_id": SERVICE}))
+
+
 def rollback_args(**overrides):
     args = {
         "action": "rollback_deploy",
@@ -63,8 +68,9 @@ class ExecutorTest(unittest.TestCase):
     def investigate(self, executor=None):
         """What a proposal is checked against: the recent deploys and the metric it will verify with."""
         ex = executor or self.ex
-        ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
-        ex.execute("datadog_query_metrics", json.dumps({"service_id": SERVICE, "metric": "error_rate", "lookback_minutes": 30}))
+        connect(ex)
+        ex.execute("changes_list", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        ex.execute("metrics_query", json.dumps({"service_id": SERVICE, "metric": "error_rate", "lookback_minutes": 30}))
 
     def test_read_tool_injects_tenant(self):
         out = self.ex.execute("runbook_get", json.dumps({"service_id": SERVICE}))
@@ -72,7 +78,8 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(self.mcp.calls[-1]["tenant_id"], TENANT)
 
     def test_support_cases_come_from_salesforce_scoped_to_tenant(self):
-        out = self.ex.execute("salesforce_search_cases", json.dumps({"service_id": SERVICE, "since": "2026-10-16T02:54:00Z"}))
+        connect(self.ex)
+        out = self.ex.execute("support_cases_search", json.dumps({"service_id": SERVICE, "since": "2026-10-16T02:54:00Z"}))
         self.assertIn("baseline_per_hour", out)
         self.assertEqual((self.mcp.calls[-1]["server"], self.mcp.calls[-1]["tenant_id"]), ("salesforce", TENANT))
 
@@ -87,8 +94,9 @@ class ExecutorTest(unittest.TestCase):
 
     def test_tool_failure_becomes_data(self):
         ex = ToolExecutor(MockMCPClient("bad_deploy", {"datadog_search_logs"}), INCIDENT)
+        connect(ex)
         out = ex.execute(
-            "datadog_search_logs",
+            "logs_search",
             json.dumps({"service_id": SERVICE, "level": "error", "query": None, "lookback_minutes": 30}),
         )
         self.assertEqual(out["error"], "timeout")
@@ -148,7 +156,7 @@ class ExecutorTest(unittest.TestCase):
     def test_lax_lower_bound_for_above_checks_rejected(self):
         """business_kpi baseline is 950: 'above 100' passes even if checkouts stay down 90%."""
         self.investigate()
-        self.ex.execute("datadog_query_metrics", json.dumps({"service_id": SERVICE, "metric": "business_kpi", "lookback_minutes": 30}))
+        self.ex.execute("metrics_query", json.dumps({"service_id": SERVICE, "metric": "business_kpi", "lookback_minutes": 30}))
         lax = {"metric": "business_kpi", "comparison": "above", "threshold": 100, "within_minutes": 10}
         out = self.ex.execute("propose_action", rollback_args(how_to_verify=lax))
         self.assertIn("less than 1/3", out["detail"])
@@ -156,7 +164,7 @@ class ExecutorTest(unittest.TestCase):
     def test_check_that_already_passes_rejected(self):
         """latency_p99 is 460 now (baseline 420): 'below 1000' is true before the fix, so it proves nothing."""
         self.investigate()
-        self.ex.execute("datadog_query_metrics", json.dumps({"service_id": SERVICE, "metric": "latency_p99", "lookback_minutes": 30}))
+        self.ex.execute("metrics_query", json.dumps({"service_id": SERVICE, "metric": "latency_p99", "lookback_minutes": 30}))
         passing = {"metric": "latency_p99", "comparison": "below", "threshold": 1000, "within_minutes": 10}
         out = self.ex.execute("propose_action", rollback_args(how_to_verify=passing))
         self.assertIn("already passes now", out["detail"])
@@ -182,7 +190,7 @@ class ExecutorTest(unittest.TestCase):
     def test_proposal_never_reaches_an_mcp_server(self):
         self.investigate()
         self.ex.execute("propose_action", rollback_args())
-        self.assertEqual([c["tool"] for c in self.mcp.calls], ["changes_list_recent", "datadog_query_metrics"])
+        self.assertEqual([c["tool"] for c in self.mcp.calls], ["pagerduty_list_service_integrations", "changes_list_recent", "datadog_query_metrics"])
 
     def test_duplicate_proposal_not_recorded_twice(self):
         self.investigate()

@@ -12,18 +12,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
+from sre_agent.connectors import ConnectorError, Router
 from sre_agent.models import IncidentRef, ProposedAction, SideEffect, ToolCallRecord
+from sre_agent.tools.executor_types import MCPClient
 from sre_agent.tools.registry import REGISTRY
 from sre_agent.timeline import utc_now
 from sre_agent.triage import fast_track_reason
-
-
-class MCPClient(Protocol):
-    def call_tool(
-        self, server: str, tool: str, arguments: dict[str, Any], *, tenant_id: str, timeout_s: float
-    ) -> dict[str, Any]: ...
 
 
 class ToolRejected(Exception):
@@ -59,6 +55,8 @@ class ToolExecutor:
         self.now = now
         self._related_services: set[str] = set()  # downstream dependencies, for memory recall
         self._seen_memory_fixes: list[dict[str, Any]] = []  # verified fixes recalled from memory
+        # Built from the service's integrations once they are read; None until then.
+        self.router: Router | None = None
         # The prior_* arguments let a resumed investigation carry forward what this incident already tried.
         self.proposed_actions: list[ProposedAction] = list(prior_proposals or [])
         self.log: list[ToolCallRecord] = list(prior_log or [])
@@ -92,7 +90,10 @@ class ToolExecutor:
                 raise ToolRejected(f"arguments are not valid JSON: {e}") from e
             _validate(tool.parameters, args, "arguments")
 
-            if tool.side_effect is SideEffect.READ:
+            if tool.side_effect is SideEffect.READ and tool.capability:
+                result = self._call_capability(tool.capability, args, tool.timeout_s)
+                status = "error" if "error" in result else "ok"
+            elif tool.side_effect is SideEffect.READ:
                 result = self._call_mcp(tool.mcp_server, name, args, tool.timeout_s)
                 status = "error" if "error" in result else "ok"
             elif tool.side_effect is SideEffect.APPROVAL_REQUIRED:
@@ -136,7 +137,25 @@ class ToolExecutor:
         self._observe(result)
         return result
 
+    def _call_capability(self, capability: str, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+        """Route to whichever integration this service has for the capability, with the same failure handling."""
+        if self.router is None:
+            return {"error": "integrations_unknown",
+                    "detail": "this service's integrations could not be read, so no data source can be chosen"}
+        try:
+            result = self.router.call(capability, args, self.mcp, self.incident.tenant_id, timeout_s)
+        except ConnectorError as e:
+            return {"error": "not_mapped", "detail": str(e)}
+        except TimeoutError:
+            return {"error": "timeout", "detail": f"{capability} did not answer within {timeout_s}s"}
+        except Exception as e:  # vendor MCP down, client's credentials revoked, rate limited...
+            return {"error": "unavailable", "detail": f"{capability} failed: {type(e).__name__}: {e}"}
+        self._observe(result)
+        return result
+
     def _observe(self, result: dict[str, Any]) -> None:
+        if isinstance(result.get("integrations"), list):
+            self.router = Router(result["integrations"])
         for change in result.get("changes", []):
             if "deploy_id" in change:
                 self._seen_deploy_ids.add(change["deploy_id"])
@@ -173,7 +192,7 @@ class ToolExecutor:
             raise ToolRejected(f"{action} needs {missing}")
         if action == "rollback_deploy" and args["deploy_id"] not in self._seen_deploy_ids:
             raise ToolRejected(
-                f"deploy_id '{args['deploy_id']}' was not returned by changes_list_recent in this investigation"
+                f"deploy_id '{args['deploy_id']}' was not returned by changes_list in this investigation"
             )
         if action == "scale_out" and not 1 <= args["replicas"] <= 50:
             raise ToolRejected("replicas must be between 1 and 50")
@@ -234,7 +253,7 @@ class ToolExecutor:
         seen = self._seen_metrics.get(metric)
         if seen is None:
             raise ToolRejected(
-                f"query {metric} with datadog_query_metrics before using it in how_to_verify, "
+                f"query {metric} with metrics_query before using it in how_to_verify, "
                 "so the check can be anchored on its baseline"
             )
         baseline, current = seen["baseline"], seen["current"]

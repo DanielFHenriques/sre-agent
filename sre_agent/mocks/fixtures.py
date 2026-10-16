@@ -301,14 +301,41 @@ EFFECTS["deploy_red_herring"] = {
 
 # --- Integrations and support cases ----------------------------------------------------------
 
-_INTEGRATIONS = {
-    "integrations": [
-        {"vendor": "datadog", "provides": ["metrics", "logs", "apm", "monitors"]},
-        {"vendor": "github_actions", "provides": ["deploys"]},
-        {"vendor": "launchdarkly", "provides": ["feature_flags"]},
-        {"vendor": "salesforce", "provides": ["support_cases"]},
-    ]
+# The client's integrations for checkout-api, as PagerDuty knows them. `config` is what the client set up
+# when connecting: how *their* metrics are named in that vendor. The agent's connectors use it.
+_DATADOG = {
+    "vendor": "datadog",
+    "provides": ["metrics", "logs", "apm", "monitors"],
+    "config": {"metric_map": {
+        "business_kpi": "sum:checkout.orders.completed{service:checkout-api}.as_rate()",
+        "error_rate": "sum:trace.http.request.errors{service:checkout-api} / sum:trace.http.request.hits{service:checkout-api}",
+        "latency_p99": "p99:trace.http.request.duration{service:checkout-api}",
+        "request_rate": "sum:trace.http.request.hits{service:checkout-api}.as_rate()",
+        "cpu": "avg:container.cpu.usage{service:checkout-api}",
+        "memory": "avg:container.memory.usage{service:checkout-api}",
+        "db_pool_usage": "avg:hikaricp.connections.usage{service:checkout-api}",
+    }},
 }
+_NEWRELIC = {
+    "vendor": "newrelic",
+    "provides": ["metrics", "logs", "apm", "monitors"],
+    "config": {"app_name": "checkout-api-prod", "metric_map": {
+        "business_kpi": "SELECT rate(count(*), 1 minute) FROM OrderCompleted WHERE appName = 'checkout-api-prod'",
+        "error_rate": "SELECT percentage(count(*), WHERE error IS true) / 100 FROM Transaction WHERE appName = 'checkout-api-prod'",
+        "latency_p99": "SELECT percentile(duration, 99) * 1000 FROM Transaction WHERE appName = 'checkout-api-prod'",
+        "request_rate": "SELECT rate(count(*), 1 minute) FROM Transaction WHERE appName = 'checkout-api-prod'",
+        "cpu": "SELECT average(cpuPercent) / 100 FROM ProcessSample WHERE apmApplicationNames LIKE '%checkout-api-prod%'",
+        "memory": "SELECT average(memoryUsedPercent) / 100 FROM ProcessSample WHERE apmApplicationNames LIKE '%checkout-api-prod%'",
+        "db_pool_usage": "SELECT average(custom.hikari.usage) FROM Metric WHERE appName = 'checkout-api-prod'",
+    }},
+}
+_REST = [
+    {"vendor": "github_actions", "provides": ["deploys"]},
+    {"vendor": "launchdarkly", "provides": ["feature_flags"]},  # no connector yet: listed, not usable
+    {"vendor": "salesforce", "provides": ["support_cases"]},
+]
+_INTEGRATIONS = {"integrations": [_DATADOG, *_REST]}
+_NEWRELIC_INTEGRATIONS = {"integrations": [_NEWRELIC, *_REST]}
 
 # Noise every window has: a case unrelated to this service, opened before onset.
 _UNRELATED_CASE = {
@@ -427,3 +454,9 @@ EFFECTS["low_sev_recurring"] = {
         "metrics": {"error_rate": _metric(0.004, 0.004, "2026-10-16T03:12:00Z")},
     },
 }
+
+
+# The same incident as bad_deploy, for a client that uses New Relic instead of Datadog. The agent's logic
+# is identical; only the connector and the vendor's query language and response shapes differ.
+SCENARIOS["bad_deploy_newrelic"] = {**SCENARIOS["bad_deploy"], "pagerduty_list_service_integrations": _NEWRELIC_INTEGRATIONS}
+EFFECTS["bad_deploy_newrelic"] = EFFECTS["bad_deploy"]

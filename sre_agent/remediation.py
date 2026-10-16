@@ -85,7 +85,9 @@ class Remediator:
         self.now = now
         # Must be set (ApprovalPolicy(state)) before anything can be approved. Fail closed.
         self.policy: ApprovalPolicy | None = None
-        # Verification reads go through the same policy gate as the agent's: tenant-scoped and logged.
+        self.mcp = mcp
+        # Verification reads go through the same policy gate as the agent's: tenant-scoped, logged, and
+        # routed through the service's integrations (rebuilt from the incident's transcript when verifying).
         self.executor = ToolExecutor(mcp, incident)
 
     def reject(self, proposal: ProposedAction, rejected_by: str, timeline: list[TimelineEntry] | None = None) -> None:
@@ -145,6 +147,7 @@ class Remediator:
             raise ApprovalError(f"{proposal.action} is '{proposal.status}', not pending approval")
 
     def _verify(self, proposal: ProposedAction) -> Verification:
+        self.executor = ToolExecutor(self.mcp, self.incident, transcript=self.policy.state.messages)
         check = proposal.how_to_verify
         if check is None:
             return Verification(proposal.action, "not_applicable", "No metric check for this action.")
@@ -154,7 +157,7 @@ class Remediator:
         readings: list[dict[str, Any]] = []
         for attempt in range(1, attempts + 1):
             out = self.executor.execute(
-                "datadog_query_metrics",
+                "metrics_query",
                 json.dumps({
                     "service_id": self.incident.service_id,
                     "metric": metric,

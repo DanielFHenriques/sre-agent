@@ -1,7 +1,7 @@
 """Run one mocked incident end to end and print what the responder would see.
 
     py -m sre_agent --scenario bad_deploy
-    py -m sre_agent --scenario dependency_outage --fail datadog_search_logs
+    py -m sre_agent --scenario dependency_outage --fail logs_search
     py -m sre_agent --scenario bad_deploy --approve 1                 # approve proposal 1, then verify it
     py -m sre_agent --scenario dependency_outage --approve 1,2        # approve two proposals at once
     py -m sre_agent --scenario deploy_red_herring --approve 1 --approve 1

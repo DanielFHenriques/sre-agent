@@ -60,7 +60,7 @@ class ResumeTest(unittest.TestCase):
         agent, _, first, verification = first_fix_fails()
         second = agent.resume(INCIDENT, first, verification)
         new_reads = second.tool_log[len(first.tool_log):]
-        metrics = {r.arguments.get("metric") for r in new_reads if r.tool == "datadog_query_metrics"}
+        metrics = {r.arguments.get("metric") for r in new_reads if r.tool == "metrics_query"}
         self.assertTrue({"request_rate", "db_pool_usage"} <= metrics)
 
     def test_executor_refuses_to_repeat_a_failed_fix(self):

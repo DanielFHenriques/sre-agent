@@ -16,8 +16,11 @@ from sre_agent.tools import specs
 class ToolDef:
     spec: dict[str, Any]
     side_effect: SideEffect
-    mcp_server: str | None = None  # None: handled locally by the executor
+    mcp_server: str | None = None  # a fixed server (PagerDuty, runbooks, the agent's memory); None: local
     timeout_s: float = 5.0
+    # Integration-agnostic tools name a capability instead of a server: the service's integrations decide
+    # which vendor's connector answers (see connectors.py).
+    capability: str | None = None
 
     @property
     def name(self) -> str:
@@ -32,12 +35,12 @@ _TOOLS = [
     ToolDef(specs.GET_INCIDENT, SideEffect.READ, "pagerduty"),
     ToolDef(specs.GET_SERVICE_CONTEXT, SideEffect.READ, "pagerduty"),
     ToolDef(specs.LIST_SERVICE_INTEGRATIONS, SideEffect.READ, "pagerduty"),
-    ToolDef(specs.SEARCH_SUPPORT_CASES, SideEffect.READ, "salesforce"),
-    ToolDef(specs.LIST_RECENT_CHANGES, SideEffect.READ, "changes"),
-    ToolDef(specs.LIST_TRIGGERED_MONITORS, SideEffect.READ, "datadog"),
-    ToolDef(specs.QUERY_METRICS, SideEffect.READ, "datadog"),
-    ToolDef(specs.SEARCH_LOGS, SideEffect.READ, "datadog", timeout_s=10.0),
-    ToolDef(specs.GET_DEPENDENCY_HEALTH, SideEffect.READ, "datadog"),
+    ToolDef(specs.SEARCH_SUPPORT_CASES, SideEffect.READ, capability="support_cases"),
+    ToolDef(specs.LIST_RECENT_CHANGES, SideEffect.READ, capability="changes"),
+    ToolDef(specs.LIST_TRIGGERED_MONITORS, SideEffect.READ, capability="alerts"),
+    ToolDef(specs.QUERY_METRICS, SideEffect.READ, capability="metrics"),
+    ToolDef(specs.SEARCH_LOGS, SideEffect.READ, timeout_s=10.0, capability="logs"),
+    ToolDef(specs.GET_DEPENDENCY_HEALTH, SideEffect.READ, capability="dependency_health"),
     ToolDef(specs.SEARCH_SIMILAR_INCIDENTS, SideEffect.READ, "pagerduty"),
     ToolDef(specs.GET_RUNBOOK, SideEffect.READ, "runbooks"),
     # First-party: served by the agent's own memory store, not an MCP server. Still tenant-injected.
@@ -49,6 +52,9 @@ _TOOLS = [
 REGISTRY: dict[str, ToolDef] = {t.name: t for t in _TOOLS}
 
 
-def openai_tools() -> list[dict[str, Any]]:
-    """The `tools=[...]` argument for chat.completions.create."""
-    return [t.spec for t in _TOOLS]
+def openai_tools(covered: set[str] | None = None) -> list[dict[str, Any]]:
+    """The `tools=[...]` argument for chat.completions.create.
+
+    With `covered`, capability tools are offered only if this service has an integration providing them.
+    """
+    return [t.spec for t in _TOOLS if t.capability is None or covered is None or t.capability in covered]

@@ -56,8 +56,8 @@ LIST_SERVICE_INTEGRATIONS = function_tool(
 )
 
 SEARCH_SUPPORT_CASES = function_tool(
-    "salesforce_search_cases",
-    "Customer support cases related to this service opened since a time (use the incident onset): counts, "
+    "support_cases_search",
+    "Customer support cases (from whichever support tool the client integrated) related to this service opened since a time (use the incident onset): counts, "
     "enterprise-account count, the normal rate of new cases, and a small sample. Aggregated at the source so "
     "a big burst cannot blow the context. A burst after onset means the incident is customer-facing.",
     {
@@ -67,23 +67,25 @@ SEARCH_SUPPORT_CASES = function_tool(
 )
 
 LIST_RECENT_CHANGES = function_tool(
-    "changes_list_recent",
-    "Deploys, config changes and feature-flag flips for a service in the lookback window, newest first.",
+    "changes_list",
+    "Deploys, config changes and feature-flag flips for a service in the lookback window, newest first, "
+    "from the client's integrated deploy tool.",
     {"service_id": SERVICE_ID, "lookback_minutes": LOOKBACK},
 )
 
 LIST_TRIGGERED_MONITORS = function_tool(
-    "datadog_list_triggered_monitors",
-    "Monitors currently in alert for this service and for its dependencies. Use it to tell a "
-    "service-local problem from a wider one.",
+    "alerts_list",
+    "Alerts currently firing for this service and for its dependencies, from the client's integrated "
+    "monitoring. Use it to tell a service-local problem from a wider one.",
     {"service_id": SERVICE_ID},
 )
 
 METRICS = ["business_kpi", "error_rate", "latency_p99", "request_rate", "cpu", "memory", "db_pool_usage"]
 
 QUERY_METRICS = function_tool(
-    "datadog_query_metrics",
-    "Time series for one service metric with a summary (baseline, current, change point). "
+    "metrics_query",
+    "One service metric from the client's integrated metrics tool, summarized (baseline, current, change "
+    "point). The integration maps these names to the client's own metrics. "
     "Look for step changes and when they started, not just high values. 'business_kpi' is the "
     "service's business metric (named in the service context); use it to size customer impact.",
     {
@@ -94,23 +96,24 @@ QUERY_METRICS = function_tool(
 )
 
 SEARCH_LOGS = function_tool(
-    "datadog_search_logs",
-    "Search the service's application logs. Returns error patterns grouped by message template, "
+    "logs_search",
+    "Search the service's application logs in the client's integrated log tool. Returns error patterns "
+    "grouped by message template, "
     "with count and first_seen time, not raw lines.",
     {
         "service_id": SERVICE_ID,
         "level": {"type": "string", "enum": ["error", "warn"]},
         "query": {
             "type": ["string", "null"],
-            "description": "Optional extra filter, Datadog log query syntax. null for none.",
+            "description": "Optional free-text filter on the message. null for none.",
         },
         "lookback_minutes": LOOKBACK,
     },
 )
 
 GET_DEPENDENCY_HEALTH = function_tool(
-    "datadog_get_dependency_health",
-    "APM view of the service's downstream dependencies: error rate and p99 latency per dependency, "
+    "dependency_health",
+    "Tracing view of the service's downstream dependencies: error rate and p99 latency per dependency, "
     "current vs baseline. Use it to decide whether the problem is ours or a dependency's.",
     {"service_id": SERVICE_ID},
 )

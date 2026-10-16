@@ -110,9 +110,9 @@ def distill(state: AgentResult, incident: IncidentRef, resolved_at: str) -> Memo
     logs: dict[str, Any] = {}
     metrics: dict[str, dict[str, Any]] = {}
     for name, args, result in _tool_results(state):
-        if name == "datadog_search_logs" and "patterns" in result:
+        if name == "logs_search" and "patterns" in result:
             logs = result
-        if name == "datadog_query_metrics" and "baseline" in result:
+        if name == "metrics_query" and "baseline" in result:
             metrics.setdefault(args["metric"], result)  # the incident as first seen, before any fix
 
     patterns = sorted(logs.get("patterns", []), key=lambda p: -p.get("count", 0))[:2]

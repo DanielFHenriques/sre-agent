@@ -111,7 +111,7 @@ class RemediationTest(unittest.TestCase):
         remediator.approve(result.proposed_actions[0], "alice")
 
         self.assertEqual({c["tenant_id"] for c in mcp.calls}, {TENANT})
-        self.assertTrue(all(r.tool == "datadog_query_metrics" for r in remediator.executor.log))
+        self.assertTrue(all(r.tool == "metrics_query" for r in remediator.executor.log))
 
 
 if __name__ == "__main__":

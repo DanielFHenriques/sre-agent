@@ -77,14 +77,14 @@ class MockReasoningLLM:
         service = incident.get("service_id", "unknown")
         window = 30
 
-        if not forced and not phase.called("datadog_search_logs"):
+        if not forced and not phase.called("logs_search"):
             wider = [
-                ("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
+                ("metrics_query", {"service_id": service, "metric": m, "lookback_minutes": window})
                 for m in ("request_rate", "db_pool_usage", "cpu")
             ] if resumed_at is not None else []
             # On the first pass, prefetch already read the KPI and error rate; after a failed fix, re-read them.
             impact_reads = [
-                ("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
+                ("metrics_query", {"service_id": service, "metric": m, "lookback_minutes": window})
                 for m in ("business_kpi", "error_rate")
                 if resumed_at is not None or seen.metric(m) is None
             ]
@@ -94,14 +94,14 @@ class MockReasoningLLM:
                 if resumed_at is not None
                 else "Triage is done. Checking the latency trend, error logs, and dependency health in parallel.",
                 wider + impact_reads + [
-                    ("datadog_query_metrics", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
-                    ("datadog_search_logs", {"service_id": service, "level": "error", "query": None, "lookback_minutes": window}),
-                    ("datadog_get_dependency_health", {"service_id": service}),
+                    ("metrics_query", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
+                    ("logs_search", {"service_id": service, "level": "error", "query": None, "lookback_minutes": window}),
+                    ("dependency_health", {"service_id": service}),
                 ],
             )
 
         if not forced and not phase.called("runbook_get"):
-            logs = seen.latest("datadog_search_logs") or {}
+            logs = seen.latest("logs_search") or {}
             top = (logs.get("patterns") or [{}])[0].get("template", "elevated 5xx error rate")
             calls = [
                 ("pagerduty_search_similar_incidents", {"service_id": service, "symptoms": top}),
@@ -124,7 +124,7 @@ class MockReasoningLLM:
                 f"Memory {hint['incident_id']} ({hint['similarity']:.0%} similar): with these symptoms, "
                 f"{'; '.join(hint['did_not_work']) or 'nothing'} did not help and {'; '.join(hint['worked'])} did. "
                 "Checking traffic and saturation before proposing anything.",
-                [("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
+                [("metrics_query", {"service_id": service, "metric": m, "lookback_minutes": window})
                  for m in ("request_rate", "db_pool_usage", "cpu")],
             )
 
@@ -142,7 +142,7 @@ class MockReasoningLLM:
         a, t = b["assessment"], b["triage"]
 
         if re.search(r"error rate|right now|currently", q) and not looked_up:
-            return self._calls(None, [("datadog_query_metrics", {
+            return self._calls(None, [("metrics_query", {
                 "service_id": b["service_id"], "metric": "error_rate", "lookback_minutes": 10})])
         if looked_up:
             r = looked_up[-1]
@@ -200,7 +200,7 @@ class _Seen:
         return entries[-1][1] if entries else None
 
     def metric(self, name: str) -> dict[str, Any] | None:
-        for args, out in reversed(self.by_tool.get("datadog_query_metrics", [])):
+        for args, out in reversed(self.by_tool.get("metrics_query", [])):
             if args.get("metric") == name:
                 return out
         return None
@@ -227,9 +227,9 @@ def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()
     onset = _ts(incident["onset_estimate"]) if "onset_estimate" in incident else None
     failed = seen.failed()
 
-    changes = (seen.latest("changes_list_recent") or {}).get("changes", [])
-    logs = seen.latest("datadog_search_logs") or {}
-    deps_result = seen.latest("datadog_get_dependency_health") or {}
+    changes = (seen.latest("changes_list") or {}).get("changes", [])
+    logs = seen.latest("logs_search") or {}
+    deps_result = seen.latest("dependency_health") or {}
     deps_known = "dependencies" in deps_result
     runbook = seen.latest("runbook_get") or {}
 

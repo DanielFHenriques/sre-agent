@@ -7,8 +7,12 @@ it worked. If it did not, the agent re-investigates. Engineers can ask it about 
 behind three layers of guardrails. State is checkpointed, so an investigation survives a crash or a
 handover. Finished incidents are distilled into memory, so the next similar one starts further ahead.
 
-Everything external is mocked: MCP tools, incident data, the action backend and, by default, the
-model. Tools and messages use the OpenAI Chat Completions function-calling format, and a real
+The agent never talks to a vendor directly. It sees capabilities (metrics, logs, dependency
+health, alerts, changes, support cases), and the client's own service integrations decide which
+vendor answers each one, through a connector per vendor.
+
+Everything external is mocked: the vendors' MCP servers, incident data, the action backend and, by
+default, the model. Tools and messages use the OpenAI Chat Completions function-calling format, and a real
 OpenAI model can be swapped in.
 
 The longer design notes, including the brainstorm this started from, are in
@@ -21,6 +25,7 @@ Python 3.11+, standard library only.
 ```bash
 py -m sre_agent --scenario bad_deploy
 py -m sre_agent --scenario dependency_outage --approve 1,2
+py -m sre_agent --scenario bad_deploy_newrelic --approve 1               # same incident, client uses New Relic
 py -m sre_agent --scenario bad_deploy --fail datadog_search_logs        # a tool times out
 py -m sre_agent --scenario deploy_red_herring --approve 1 --approve 1   # first fix fails, agent re-investigates
 py -m sre_agent --scenario low_sev_recurring --approve 1 --approver bob # SEV-4, fast-tracked; any responder may approve
@@ -67,6 +72,7 @@ responses.
 | `bad_deploy` | A deploy 3 min before onset added a new exception | Proposes a rollback of that exact deploy; verification passes |
 | `dependency_outage` | payments-gateway is failing; no recent change | Does **not** roll back. Proposes the runbook's fallback flag and pages the owning team |
 | `deploy_red_herring` | A harmless deploy lands just before a traffic spike exhausts the DB pool | Confidently proposes a rollback, which fails verification. Re-investigates wider, finds saturation, proposes scale-out, which passes |
+| `bad_deploy_newrelic` | `bad_deploy` for a client on New Relic instead of Datadog | Exactly the same outcome; only the connector, the query language (NRQL) and the response shapes differ |
 | `low_sev_recurring` | A release breaks the gift-card endpoint again: KPI -0.9%, no customer cases, and the same rollback fixed it twice before | Triage says SEV-4 / low; the rollback is offered as a **fast-track**, one-click approval that any responder can give |
 
 `deploy_red_herring` is deliberate: it shows the agent being wrong in the most plausible way, and
@@ -75,8 +81,10 @@ what contains the damage.
 ## How it works, in one pass
 
 1. **Prefetch, no model, in two waves.** First the incident, the service and the service's
-   integrations. Then only the sources that service actually has: recent changes, triggered
-   monitors, the business KPI, the error rate, and Salesforce support cases since onset.
+   integrations. The integrations decide which connector answers each capability, using the
+   client's own configuration (how *they* named their KPI, which app name, and so on). Then it reads
+   only what that service has: recent changes, firing alerts, the business KPI, the error rate, and
+   support cases since onset.
 2. **Triage, no model.** Severity comes from the business-KPI drop. A burst of related support
    cases raises it (customer reports win over quiet graphs), and enterprise accounts raise it
    further. Priority adds PagerDuty urgency. The result sets the response mode:
@@ -86,7 +94,7 @@ what contains the damage.
    - **low** (SEV-4/5, and we know customers aren't reporting it): lean investigation.
 
    Investigation can raise severity later, never lower it.
-3. **Loop.** The model picks tools (metrics with the business KPI first, grouped error logs,
+3. **Loop.** The model is offered only the capabilities this service has integrated, and picks tools (metrics with the business KPI first, grouped error logs,
    dependency health, similar past incidents, the runbook) until it calls `submit_assessment`.
    Budgets on steps, tool calls and wall clock, plus stall detection. If any budget runs out, the
    model is forced to give a final answer, so the responder always gets a partial answer instead of
@@ -190,7 +198,7 @@ Mine. Each would be a question for the team:
 | **A model-based scope check** | Regex plus a structural boundary first | A small, cheap classifier ahead of the answering model for questions that pass the regex but are off-topic or adversarial in ways regex can't see (other languages, paraphrase) |
 | **Posting to Slack or Teams** | One surface, CLI | Post timeline entries as they happen. Not every tool call: too-frequent updates are an anti-pattern in PagerDuty's guidance |
 | **Multiple languages** | Out of time | The model reasons in English over tool data. Translate only what humans read (summary, proposals, brief) at the edge, and keep identifiers and metric names untranslated |
-| **Growing the integration ecosystem** | Out of time | `registry.py` is the seam. A new integration is an MCP server plus registry entries with a side-effect tag. Its schemas are linted by the same strict-mode test |
+| **Coverage shown to the responder, and integration health** | Next commits | Tell the responder up front what the agent can and can't see for this service, limit what it may propose accordingly, and treat a broken connection (expired token, revoked access) as unavailable, reported to the client, with failover only between the client's own integrations |
 
 ## Where it breaks first
 
@@ -312,6 +320,7 @@ exceeds the context window or becomes slow and expensive per step.
 | Path | What |
 |---|---|
 | `sre_agent/tools/specs.py` | OpenAI strict function schemas for every tool |
+| `sre_agent/connectors.py` | One connector per vendor (Datadog, New Relic, GitHub Actions, Salesforce) and the per-service router built from integrations |
 | `sre_agent/tools/registry.py` | Tool -> side effect (read / approval_required / terminal) -> MCP server |
 | `sre_agent/tools/executor.py` | Policy gate: validation, tenant injection, timeouts, proposal checks, truncation, call log |
 | `sre_agent/agent.py` | Core loop: prefetch, model <-> tools, budgets, stall detection, forced answer, resume, recover, checkpoints |
@@ -323,7 +332,7 @@ exceeds the context window or becomes slow and expensive per step.
 | `sre_agent/state.py` | Persisted incident state: tenant-scoped keys, atomic writes, version check |
 | `sre_agent/timeline.py` | Scribe timeline written by code, and the handover brief |
 | `sre_agent/mocks/` | Four scenarios, the mock MCP servers (incl. Salesforce), and what each action changes |
-| `tests/` | 112 tests: schemas, executor checks, scenarios, triage, fast-track, guardrails, approvals, verification, re-investigation, state and recovery |
+| `tests/` | 122 tests: schemas, executor checks, scenarios, triage, fast-track, guardrails, approvals, verification, re-investigation, state and recovery |
 
 ## Reading the history
 
@@ -347,4 +356,5 @@ The commits are meant to be reviewed in order:
 16. `1a11c72` guardrail layers 2 and 3: isolated read-only ask path, output filter
 17. `deabe42` only assigned responders approve; the Incident Commander in a major incident
 18. `1949fd4` README and design update for the above
-19. cross-incident memory
+19. `1689c44` cross-incident memory
+20. integration-agnostic capability tools, connectors per vendor, routing by the service's integrations
