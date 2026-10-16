@@ -204,7 +204,7 @@ EFFECTS: dict[str, dict[str, dict[str, Any]]] = {
         "toggle_feature_flag": {
             "lag_reads": 1,
             "metrics": {
-                "error_rate": _metric(0.004, 0.012, "2026-10-16T03:13:00Z"),
+                "error_rate": _metric(0.004, 0.008, "2026-10-16T03:13:00Z"),
                 "business_kpi": _metric(950, 930, "2026-10-16T03:13:00Z"),
             },
         },

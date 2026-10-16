@@ -165,12 +165,22 @@ re-investigation, and it can't be retried. The cheaper fix is to look at saturat
 pass whenever the error is a timeout or pool exhaustion. The real fix is an eval set made of
 incidents where the obvious answer was wrong.
 
-### 3. The model writes its own success criterion
+### 3. The model writes its own success criterion (mitigated)
 
-`how_to_verify` comes from the model. A model that proposes `error_rate below 0.5` makes any fix
-"work". The executor checks the shape and the time window, **not whether the threshold is
-sensible**. Fix: require the threshold to be near the metric's baseline (for example within 3x),
-or take the check from the runbook rather than the model.
+`how_to_verify` comes from the model. A model that proposes `error_rate below 0.5` would make any
+fix "work". The executor now rejects a check that can't tell success apart from failure:
+- **Unread metric.** The metric was never read in this investigation, so there is no baseline to
+  anchor the check on.
+- **Far from normal.** The threshold is more than 3x the metric's baseline (or less than a third
+  of it, for `above` checks).
+- **Already passing.** The check is true before the fix runs, so it would also be true if the fix
+  did nothing.
+
+The baselines are rebuilt from the transcript on resume and recover, so the check survives both.
+What remains:
+- **The 3x ratio is one number for every metric.** In practice it should be set per metric, or
+  taken from the runbook rather than chosen by the model.
+- **A zero baseline skips the ratio rule.** Only the "already passing" check applies then.
 
 ### 4. Non-determinism hidden by the mock
 
@@ -227,7 +237,7 @@ exceeds the context window or becomes slow and expensive per step.
 | `sre_agent/state.py` | Persisted incident state: tenant-scoped keys, atomic writes, version check |
 | `sre_agent/timeline.py` | Scribe timeline written by code, and the handover brief |
 | `sre_agent/mocks/` | Three scenarios, the mock MCP servers, and what each action changes |
-| `tests/` | 52 tests: schemas, guardrails, scenarios, verification, re-investigation, state and recovery |
+| `tests/` | 58 tests: schemas, guardrails, scenarios, verification, re-investigation, state and recovery |
 
 ## Reading the history
 
@@ -242,4 +252,5 @@ The commits are meant to be reviewed in order:
 7. `30610fa` approve, execute, verify
 8. `58a1617` re-investigate when a fix fails
 9. `b233af3` timeline, persisted state, crash recovery, handover
-10. this README
+10. `fda4caf` this README
+11. reject verification checks that can't tell success from failure (failure mode 3)

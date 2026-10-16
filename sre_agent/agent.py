@@ -174,7 +174,7 @@ class SREAgent:
         executor = ToolExecutor(
             self.mcp,
             incident,
-            known_deploy_ids=deploy_ids_in(state.messages),
+            transcript=state.messages,
             prior_proposals=state.proposed_actions,
             prior_log=state.tool_log,
         )
@@ -313,22 +313,6 @@ class SREAgent:
     def _append(self, messages, message: dict[str, Any]) -> None:
         messages.append(message)
         self.on_message(message)
-
-
-def deploy_ids_in(messages: list[dict[str, Any]]) -> set[str]:
-    """Deploy ids shown by tool results in the transcript, so a resumed executor keeps its rollback guardrail."""
-    ids: set[str] = set()
-    for m in messages:
-        if m["role"] != "tool":
-            continue
-        try:
-            content = json.loads(m["content"])
-        except json.JSONDecodeError:
-            continue
-        for change in content.get("changes", []) if isinstance(content, dict) else []:
-            if "deploy_id" in change:
-                ids.add(change["deploy_id"])
-    return ids
 
 
 def _escalation(previous: AgentResult, verification: Verification) -> dict[str, Any]:

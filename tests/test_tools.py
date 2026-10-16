@@ -60,6 +60,12 @@ class ExecutorTest(unittest.TestCase):
         self.mcp = MockMCPClient("bad_deploy")
         self.ex = ToolExecutor(self.mcp, INCIDENT)
 
+    def investigate(self, executor=None):
+        """What a proposal is checked against: the recent deploys and the metric it will verify with."""
+        ex = executor or self.ex
+        ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        ex.execute("datadog_query_metrics", json.dumps({"service_id": SERVICE, "metric": "error_rate", "lookback_minutes": 30}))
+
     def test_read_tool_injects_tenant(self):
         out = self.ex.execute("runbook_get", json.dumps({"service_id": SERVICE}))
         self.assertIn("failure_modes", out)
@@ -87,29 +93,29 @@ class ExecutorTest(unittest.TestCase):
         out = self.ex.execute("propose_action", rollback_args())
         self.assertEqual(out["error"], "rejected")
 
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         out = self.ex.execute("propose_action", rollback_args())
         self.assertEqual(out["status"], "pending_approval")
         self.assertEqual(len(self.ex.proposed_actions), 1)
 
     def test_rollback_of_made_up_deploy_rejected(self):
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         out = self.ex.execute("propose_action", rollback_args(deploy_id="dep-9999"))
         self.assertEqual(out["error"], "rejected")
 
     def test_remediation_without_verification_rejected(self):
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         out = self.ex.execute("propose_action", rollback_args(how_to_verify=None))
         self.assertEqual(out["error"], "rejected")
         self.assertIn("how_to_verify", out["detail"])
 
     def test_empty_risk_rejected(self):
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         out = self.ex.execute("propose_action", rollback_args(risk={"level": "low", "description": " "}))
         self.assertEqual(out["error"], "rejected")
 
     def test_malformed_verification_rejected_by_schema(self):
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         out = self.ex.execute("propose_action", rollback_args(how_to_verify={"metric": "error_rate"}))
         self.assertEqual(out["error"], "rejected")
         self.assertIn("no allowed shape", out["detail"])
@@ -119,13 +125,62 @@ class ExecutorTest(unittest.TestCase):
         out = self.ex.execute("propose_action", json.dumps(args))
         self.assertEqual(out["status"], "pending_approval")
 
+    def test_lax_verification_threshold_rejected(self):
+        """error_rate baseline is 0.004: 'below 0.5' would call a fix that leaves errors 100x normal a success."""
+        self.investigate()
+        lax = {"metric": "error_rate", "comparison": "below", "threshold": 0.5, "within_minutes": 10}
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify=lax))
+        self.assertEqual(out["error"], "rejected")
+        self.assertIn("more than 3x", out["detail"])
+        self.assertEqual(self.ex.proposed_actions, [])
+
+    def test_threshold_at_the_limit_accepted(self):
+        self.investigate()
+        edge = {"metric": "error_rate", "comparison": "below", "threshold": 0.012, "within_minutes": 10}
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify=edge))
+        self.assertEqual(out["status"], "pending_approval")
+
+    def test_lax_lower_bound_for_above_checks_rejected(self):
+        """business_kpi baseline is 950: 'above 100' passes even if checkouts stay down 90%."""
+        self.investigate()
+        self.ex.execute("datadog_query_metrics", json.dumps({"service_id": SERVICE, "metric": "business_kpi", "lookback_minutes": 30}))
+        lax = {"metric": "business_kpi", "comparison": "above", "threshold": 100, "within_minutes": 10}
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify=lax))
+        self.assertIn("less than 1/3", out["detail"])
+
+    def test_check_that_already_passes_rejected(self):
+        """latency_p99 is 460 now (baseline 420): 'below 1000' is true before the fix, so it proves nothing."""
+        self.investigate()
+        self.ex.execute("datadog_query_metrics", json.dumps({"service_id": SERVICE, "metric": "latency_p99", "lookback_minutes": 30}))
+        passing = {"metric": "latency_p99", "comparison": "below", "threshold": 1000, "within_minutes": 10}
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify=passing))
+        self.assertIn("already passes now", out["detail"])
+
+    def test_verification_metric_must_have_been_read(self):
+        self.investigate()
+        unread = {"metric": "db_pool_usage", "comparison": "below", "threshold": 0.5, "within_minutes": 10}
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify=unread))
+        self.assertIn("query db_pool_usage", out["detail"])
+
+    def test_baselines_rebuilt_from_transcript(self):
+        """A resumed or recovered executor must keep the check, not start from a blank slate."""
+        transcript = [{"role": "tool", "tool_call_id": "x", "content": json.dumps(
+            {"metric": "error_rate", "baseline": 0.004, "current": 0.21, "change_point": None})},
+            {"role": "tool", "tool_call_id": "y", "content": json.dumps(
+            {"changes": [{"deploy_id": "dep-7731"}]})}]
+        ex = ToolExecutor(self.mcp, INCIDENT, transcript=transcript)
+        lax = {"metric": "error_rate", "comparison": "below", "threshold": 0.5, "within_minutes": 10}
+        self.assertIn("more than 3x", ex.execute("propose_action", rollback_args(how_to_verify=lax))["detail"])
+        self.assertEqual(ex.execute("propose_action", rollback_args())["status"], "pending_approval")
+        self.assertEqual(self.mcp.calls, [])  # nothing re-fetched: it all came from the transcript
+
     def test_proposal_never_reaches_an_mcp_server(self):
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         self.ex.execute("propose_action", rollback_args())
-        self.assertEqual([c["tool"] for c in self.mcp.calls], ["changes_list_recent"])
+        self.assertEqual([c["tool"] for c in self.mcp.calls], ["changes_list_recent", "datadog_query_metrics"])
 
     def test_duplicate_proposal_not_recorded_twice(self):
-        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        self.investigate()
         self.ex.execute("propose_action", rollback_args())
         self.ex.execute("propose_action", rollback_args())
         self.assertEqual(len(self.ex.proposed_actions), 1)

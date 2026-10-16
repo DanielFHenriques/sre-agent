@@ -28,6 +28,10 @@ class ToolRejected(Exception):
     pass
 
 
+# How far from a metric's baseline a verification threshold may be. Illustrative; per-metric in practice.
+MAX_BASELINE_RATIO = 3.0
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -35,7 +39,7 @@ class ToolExecutor:
         incident: IncidentRef,
         max_output_chars: int = 4000,
         clock: Callable[[], float] = time.perf_counter,
-        known_deploy_ids: set[str] | None = None,
+        transcript: list[dict[str, Any]] | None = None,
         prior_proposals: list[ProposedAction] | None = None,
         prior_log: list[ToolCallRecord] | None = None,
     ):
@@ -46,8 +50,18 @@ class ToolExecutor:
         # The prior_* arguments let a resumed investigation carry forward what this incident already tried.
         self.proposed_actions: list[ProposedAction] = list(prior_proposals or [])
         self.log: list[ToolCallRecord] = list(prior_log or [])
-        # Deploy ids the agent has actually seen in tool output. A rollback may only target one of these.
-        self._seen_deploy_ids: set[str] = set(known_deploy_ids or ())
+        # Facts the agent has actually seen in tool output, which proposals are checked against:
+        # a rollback may only target a seen deploy; a verification check is anchored on a seen metric.
+        self._seen_deploy_ids: set[str] = set()
+        self._seen_metrics: dict[str, dict[str, Any]] = {}  # latest summary per metric
+        for message in transcript or []:  # rebuilt from the transcript when resuming or recovering
+            if message["role"] == "tool":
+                try:
+                    content = json.loads(message["content"])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(content, dict):
+                    self._observe(content)
 
     def execute(self, name: str, raw_arguments: str) -> dict[str, Any]:
         start = self.clock()
@@ -98,10 +112,15 @@ class ToolExecutor:
             return {"error": "timeout", "detail": f"{server}.{tool} did not answer within {timeout_s}s"}
         except Exception as e:  # MCP server down, auth expired, rate limited...
             return {"error": "unavailable", "detail": f"{server}.{tool} failed: {type(e).__name__}: {e}"}
+        self._observe(result)
+        return result
+
+    def _observe(self, result: dict[str, Any]) -> None:
         for change in result.get("changes", []):
             if "deploy_id" in change:
                 self._seen_deploy_ids.add(change["deploy_id"])
-        return result
+        if "metric" in result and "baseline" in result and "current" in result:
+            self._seen_metrics[result["metric"]] = result
 
     # --- action proposals ------------------------------------------------------------------
 
@@ -137,8 +156,8 @@ class ToolExecutor:
         verify = args["how_to_verify"]
         if action != "page_team" and verify is None:
             raise ToolRejected(f"{action} needs how_to_verify: a metric check that shows it worked")
-        if verify is not None and not 1 <= verify["within_minutes"] <= 60:
-            raise ToolRejected("how_to_verify.within_minutes must be between 1 and 60")
+        if verify is not None:
+            self._check_verification(verify)
 
         params = {p: args[p] for p in ["target_service", *needed]}
         for existing in self.proposed_actions:
@@ -166,6 +185,43 @@ class ToolExecutor:
             "status": "pending_approval",
             "note": "NOT executed. Shown to the responder for approval. Do not assume it has happened.",
         }
+
+    def _check_verification(self, verify: dict[str, Any]) -> None:
+        """The model writes its own success criterion, so make sure it can actually tell success apart.
+
+        Two ways a check proves nothing:
+          - it is far from normal: "error_rate below 0.5" when normal is 0.004 calls a fix that
+            leaves errors 100x above normal a success;
+          - it already passes: a check that is true before the fix runs is also true if the fix
+            does nothing.
+        """
+        if not 1 <= verify["within_minutes"] <= 60:
+            raise ToolRejected("how_to_verify.within_minutes must be between 1 and 60")
+        metric, comparison, threshold = verify["metric"], verify["comparison"], verify["threshold"]
+        seen = self._seen_metrics.get(metric)
+        if seen is None:
+            raise ToolRejected(
+                f"query {metric} with datadog_query_metrics before using it in how_to_verify, "
+                "so the check can be anchored on its baseline"
+            )
+        baseline, current = seen["baseline"], seen["current"]
+        if baseline > 0:
+            if comparison == "below" and threshold > MAX_BASELINE_RATIO * baseline:
+                raise ToolRejected(
+                    f"how_to_verify threshold {threshold} is more than {MAX_BASELINE_RATIO:g}x {metric}'s baseline "
+                    f"{baseline}: the fix would count as working while {metric} is still far from normal"
+                )
+            if comparison == "above" and threshold < baseline / MAX_BASELINE_RATIO:
+                raise ToolRejected(
+                    f"how_to_verify threshold {threshold} is less than 1/{MAX_BASELINE_RATIO:g} of {metric}'s "
+                    f"baseline {baseline}: the fix would count as working while {metric} is still far from normal"
+                )
+        already = current < threshold if comparison == "below" else current > threshold
+        if already:
+            raise ToolRejected(
+                f"how_to_verify already passes now ({metric} is {current}, {comparison} {threshold}), "
+                "so it cannot show whether the fix worked"
+            )
 
     def _truncate(self, result: dict[str, Any]) -> dict[str, Any]:
         text = json.dumps(result)

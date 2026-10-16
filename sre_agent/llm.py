@@ -301,7 +301,7 @@ def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()
                     "need customer follow-up. Turn the flag off once payments-gateway recovers.",
                 },
                 "expected_effect": "Checkout stops failing on payment timeouts; error_rate drops within a few minutes.",
-                "how_to_verify": {"metric": "error_rate", "comparison": "below", "threshold": 0.02, "within_minutes": 5},
+                "how_to_verify": {"metric": "error_rate", "comparison": "below", "threshold": 0.01, "within_minutes": 5},
             })
         team = re.search(r"page (team-[\w-]+)", json.dumps(runbook))
         if team:
