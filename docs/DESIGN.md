@@ -280,6 +280,39 @@ read live from the incident:
 Identity comes from the surface's SSO login, never from text in the chat or a password or code
 typed to the agent.
 
+## Memory across incidents
+
+**What is worth remembering.** What a responder would want to know if they could talk to whoever
+handled the last similar incident:
+- what it looked like (error signature, which metrics moved);
+- what fixed it, and what did not;
+- what looked guilty but wasn't.
+
+Fixes that failed and causes ruled out are what PagerDuty's resolution notes usually lack, and the
+part that saves the most time.
+
+**Written by code.** `memory.distill` builds the record from tool results, verification verdicts
+and the structure of the final assessment. No model prose, no engineers' questions. A root cause is
+only recorded if a fix verified. Neither the model nor a user can plant a "fact".
+
+**Recall without noise:**
+- tenant first, service (and its dependencies) second;
+- score = 0.7 x error-signature overlap + 0.3 x overlap in which metrics moved;
+- halved every 90 days;
+- nothing below 0.35, at most 3 results, each a compact slice of a few hundred characters.
+
+In the tests, the red-herring memory is recalled for the same pool-timeout signature (0.8+) and
+not for the `bad_deploy` NullPointerException (0).
+
+**How it is used.** Memory tells the agent where to look, not what to do. On the second red-herring
+incident it checks saturation before proposing anything, finds it, and proposes scale-out in the
+first cycle, citing the memory. If saturation had been normal, a rollback would still have been on
+the table. Verified fixes in memory also count towards fast-track eligibility. Those verdicts were
+decided by our own code, which makes them more trustworthy than a free-text label.
+
+**Correcting it.** `retract` keeps the record for audit but never recalls it. Records decay, and
+each service keeps at most 200.
+
 ## Open questions to raise in the session
 
 - The brief refers to "the region-outage burst above", but the scenario text does not describe

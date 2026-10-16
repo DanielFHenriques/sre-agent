@@ -40,6 +40,8 @@ _TOOLS = [
     ToolDef(specs.GET_DEPENDENCY_HEALTH, SideEffect.READ, "datadog"),
     ToolDef(specs.SEARCH_SIMILAR_INCIDENTS, SideEffect.READ, "pagerduty"),
     ToolDef(specs.GET_RUNBOOK, SideEffect.READ, "runbooks"),
+    # First-party: served by the agent's own memory store, not an MCP server. Still tenant-injected.
+    ToolDef(specs.MEMORY_RECALL, SideEffect.READ, "agent_memory"),
     ToolDef(specs.PROPOSE_ACTION, SideEffect.APPROVAL_REQUIRED),
     ToolDef(specs.SUBMIT_ASSESSMENT, SideEffect.TERMINAL),
 ]

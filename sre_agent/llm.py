@@ -14,6 +14,9 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from sre_agent.memory import changed_metrics
+from sre_agent.tools.specs import METRICS
+
 ToolChoice = str | dict[str, Any]
 
 
@@ -100,15 +103,32 @@ class MockReasoningLLM:
         if not forced and not phase.called("runbook_get"):
             logs = seen.latest("datadog_search_logs") or {}
             top = (logs.get("patterns") or [{}])[0].get("template", "elevated 5xx error rate")
+            calls = [
+                ("pagerduty_search_similar_incidents", {"service_id": service, "symptoms": top}),
+                ("runbook_get", {"service_id": service}),
+            ]
+            if "memory_recall" in {t["function"]["name"] for t in tools}:
+                moved = [
+                    {"metric": m.split(":")[0], "direction": m.split(":")[1]}
+                    for m in changed_metrics({n: seen.metric(n) for n in METRICS if seen.metric(n)})
+                ]
+                calls.append(("memory_recall", {"service_id": service, "error_signature": top, "changed_metrics": moved}))
+            return self._calls("Looking for similar past incidents, our own memory of them, and the runbook.", calls)
+
+        # Memory tells us where to look; the evidence still decides.
+        memories = (phase.latest("memory_recall") or {}).get("memories", [])
+        hint = next((m for m in memories if any(w.startswith("scale_out") for w in m["worked"])
+                     or any(d.startswith("rollback_deploy") for d in m["did_not_work"])), None)
+        if not forced and hint and seen.metric("db_pool_usage") is None:
             return self._calls(
-                "Looking for similar past incidents and the runbook.",
-                [
-                    ("pagerduty_search_similar_incidents", {"service_id": service, "symptoms": top}),
-                    ("runbook_get", {"service_id": service}),
-                ],
+                f"Memory {hint['incident_id']} ({hint['similarity']:.0%} similar): with these symptoms, "
+                f"{'; '.join(hint['did_not_work']) or 'nothing'} did not help and {'; '.join(hint['worked'])} did. "
+                "Checking traffic and saturation before proposing anything.",
+                [("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
+                 for m in ("request_rate", "db_pool_usage", "cpu")],
             )
 
-        decision = _decide(seen, incident, tried)
+        decision = _decide(seen, incident, tried, memories)
         if not forced and decision["proposals"] and not phase.called("propose_action"):
             return self._calls(decision["note"], [("propose_action", p) for p in decision["proposals"]])
         return self._calls(None, [("submit_assessment", decision["assessment"])])
@@ -201,7 +221,8 @@ def _tool_results(messages: list[dict[str, Any]], since: int = 0) -> _Seen:
     return seen
 
 
-def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()) -> dict[str, Any]:
+def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset(),
+            memories: list[dict[str, Any]] = ()) -> dict[str, Any]:
     service = incident.get("service_id", "unknown")
     onset = _ts(incident["onset_estimate"]) if "onset_estimate" in incident else None
     failed = seen.failed()
@@ -235,13 +256,18 @@ def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()
     open_questions = [f"{name} failed; that evidence is missing." for name in failed]
     blank = {"deploy_id": None, "flag_name": None, "flag_value": None, "replicas": None, "team": None}
 
-    if suspect and "rollback_deploy" in tried:
+    remembered_failure = next((m for m in memories if any(d.startswith("rollback_deploy") for d in m["did_not_work"])), None)
+    if suspect and ("rollback_deploy" in tried or (saturated and remembered_failure)):
         # Keep the ruled-out hypothesis visible, with the reason it was ruled out.
         hypotheses.append({
             "cause": f"Bad deploy {suspect['version']}",
             "confidence": "low",
             "evidence_for": [f"Deploy {suspect['deploy_id']} landed at {suspect['at']}, shortly before onset"],
-            "evidence_against": ["Rollback was approved and ran, and error_rate did not recover"],
+            "evidence_against": [
+                "Rollback was approved and ran, and error_rate did not recover" if "rollback_deploy" in tried
+                else f"Last time with these symptoms ({remembered_failure['incident_id']}), rolling back did not help; "
+                "saturation explains the errors"
+            ],
         })
 
     if saturated:
@@ -250,6 +276,8 @@ def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()
             f"request_rate {request_rate['baseline']} -> {request_rate['current']} from {request_rate['change_point']}",
             f"db_pool_usage {pool['baseline']:.0%} -> {pool['current']:.0%}",
             *[f"Log pattern: {p['template']}" for p in logs.get("patterns", [])[:1]],
+            *[f"Memory {m['incident_id']}: {w} fixed the same symptoms (verified)"
+              for m in memories for w in m["worked"] if w.startswith("scale_out")][:1],
         ]
         hypotheses.insert(0, {
             "cause": "Traffic spike exhausting the database connection pool",

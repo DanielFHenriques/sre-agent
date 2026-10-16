@@ -10,6 +10,9 @@
     py -m sre_agent --scenario deploy_red_herring --state-dir .state --crash-after-steps 2
     py -m sre_agent --scenario deploy_red_herring --state-dir .state --recover --approve 1 --handover-to bob
         # the process "dies" mid-investigation; the second run picks up from the checkpoint
+    py -m sre_agent --scenario deploy_red_herring --memory-dir .memory --approve 1 --approve 1
+    py -m sre_agent --scenario deploy_red_herring --memory-dir .memory --incident-id PD-1002
+        # second time, memory points it straight at saturation: scale_out in the first cycle
     py -m sre_agent --llm openai          # real model, mocked tools (needs `openai` + OPENAI_API_KEY)
 """
 
@@ -26,6 +29,7 @@ from sre_agent.mocks.fixtures import SCENARIOS, SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import AgentResult, IncidentRef, ProposedAction, TimelineEntry, Verification
 from sre_agent.remediation import ApprovalPolicy, NotAuthorized, Remediator
+from sre_agent.memory import FileMemoryStore
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import handover_brief, utc_now
 from sre_agent.triage import summary as triage_summary
@@ -130,6 +134,8 @@ def main() -> None:
                         help="simulate the agent process dying after N model calls (needs --state-dir)")
     parser.add_argument("--recover", action="store_true",
                         help="load the incident from --state-dir and continue where it stopped")
+    parser.add_argument("--memory-dir", help="cross-incident memory: recalled during investigation, written when a fix verifies")
+    parser.add_argument("--incident-id", default="PD-1001", help="use a new id to replay a scenario as a new incident")
     parser.add_argument("--handover-to", help="hand the incident over to this person and print the brief")
     parser.add_argument("--ask", action="append", default=[],
                         help="ask the agent a question about the incident (repeatable); goes through guardrails")
@@ -143,13 +149,14 @@ def main() -> None:
     if args.crash_after_steps:
         llm = CrashAfter(llm, args.crash_after_steps)
     mcp = MockMCPClient(args.scenario, set(args.fail))
-    incident = IncidentRef("PD-1001", TENANT, SERVICE)
+    incident = IncidentRef(args.incident_id, TENANT, SERVICE)
     store = FileStateStore(args.state_dir) if args.state_dir else None
-    agent = SREAgent(llm, mcp, on_message=print_message, store=store)
+    memory = FileMemoryStore(args.memory_dir) if args.memory_dir else None
+    agent = SREAgent(llm, mcp, on_message=print_message, store=store, memory=memory)
     # Simulated clock: verification polls every 60 s of "incident time" without actually waiting.
     remediator = Remediator(MockActionRunner(mcp), mcp, incident, sleep=lambda s: None)
 
-    print(f"Incident PD-1001 on {SERVICE} (tenant {TENANT}), scenario={args.scenario}")
+    print(f"Incident {incident.incident_id} on {SERVICE} (tenant {TENANT}), scenario={args.scenario}")
     saved = store.load(incident) if store else None
     if args.recover:
         if saved is None:
@@ -192,6 +199,11 @@ def main() -> None:
         result = agent.resume(incident, result, failed)
         print_result(result)
         remediator.policy = ApprovalPolicy(result)
+
+    if memory and any(p.verification_verdict == "worked" for p in result.proposed_actions):
+        record = agent.remember(incident, result)
+        print(f"\nREMEMBERED {record.incident_id}: worked {[w['detail'] for w in record.worked]}, "
+              f"did not work {[f['detail'] for f in record.failed]}, root cause: {record.root_cause}")
 
     if args.handover_to:
         result.timeline.append(TimelineEntry(

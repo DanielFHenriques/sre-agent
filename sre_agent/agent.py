@@ -17,6 +17,7 @@ from sre_agent.llm import LLMClient
 from sre_agent.guardrails import ANSWER_BLOCKED, REPLIES, filter_answer, screen
 from sre_agent.models import AgentResult, Answer, IncidentRef, SideEffect, TimelineEntry, Verification
 from sre_agent.prompts import QA_PROMPT, SYSTEM_PROMPT
+from sre_agent.memory import FileMemoryStore, MemoryRecord, distill
 from sre_agent.state import FileStateStore
 from sre_agent.timeline import Now, investigation_entries, proposal_entry, utc_now
 from sre_agent.triage import raise_only, summary as triage_summary, triage
@@ -79,6 +80,7 @@ class SREAgent:
         clock: Callable[[], float] = time.monotonic,
         on_message: Callable[[dict[str, Any]], None] | None = None,
         store: FileStateStore | None = None,
+        memory: FileMemoryStore | None = None,
         now: Now = utc_now,
     ):
         self.llm = llm
@@ -87,6 +89,7 @@ class SREAgent:
         self.clock = clock
         self.on_message = on_message or (lambda m: None)
         self.store = store
+        self.memory = memory
         self.now = now
 
     def run(self, incident: IncidentRef) -> AgentResult:
@@ -252,8 +255,8 @@ class SREAgent:
             )},
         ]
         read_only = {name for name, t in REGISTRY.items() if t.side_effect is SideEffect.READ}
-        executor = ToolExecutor(self.mcp, incident, allowed_tools=read_only)
-        tools = [t for t in openai_tools() if t["function"]["name"] in read_only]
+        executor = ToolExecutor(self.mcp, incident, allowed_tools=read_only, local_servers=self._local_servers(), now=self.now)
+        tools = [t for t in self._tools() if t["function"]["name"] in read_only]
         text = None
         for _ in range(3):  # a question gets a few read-only lookups, not an investigation
             message = self._complete(messages, tools)
@@ -280,7 +283,30 @@ class SREAgent:
         self._checkpoint(incident, state)
         return answer
 
+    def remember(self, incident: IncidentRef, state: AgentResult) -> MemoryRecord | None:
+        """Distill a finished incident into memory. Deterministic: verified outcomes, not model prose."""
+        if self.memory is None:
+            return None
+        record = distill(state, incident, self.now())
+        self.memory.remember(incident.tenant_id, record)
+        worked = ", ".join(w["detail"] for w in record.worked) or "nothing verified"
+        failed = ", ".join(f["detail"] for f in record.failed) or "none"
+        state.timeline.append(TimelineEntry(
+            self.now(), "remembered",
+            f"Remembered for next time: worked: {worked}; did not work: {failed}; root cause: "
+            f"{record.root_cause or 'unconfirmed'}.", "agent",
+        ))
+        self._checkpoint(incident, state)
+        return record
+
     # -------------------------------------------------------------------------------------------
+
+    def _local_servers(self) -> dict[str, Any]:
+        return {"agent_memory": self.memory} if self.memory is not None else {}
+
+    def _tools(self) -> list[dict[str, Any]]:
+        """Tools offered to the model. Memory recall only when there is a memory to recall from."""
+        return [t for t in openai_tools() if self.memory is not None or t["function"]["name"] != "memory_recall"]
 
     def _executor(self, incident: IncidentRef, state: AgentResult) -> ToolExecutor:
         """An executor that knows what this incident has already seen and tried, sharing state's lists."""
@@ -290,6 +316,8 @@ class SREAgent:
             transcript=state.messages,
             prior_proposals=state.proposed_actions,
             prior_log=state.tool_log,
+            local_servers=self._local_servers(),
+            now=self.now,
         )
         state.proposed_actions = executor.proposed_actions
         state.tool_log = executor.log
@@ -298,7 +326,7 @@ class SREAgent:
 
     def _investigate(self, incident, state: AgentResult, executor: ToolExecutor, signatures, started,
                      previous_assessment) -> AgentResult:
-        tools = openai_tools()
+        tools = self._tools()
         messages = state.messages
         calls_before = len(executor.log)
         stalled, assessment = 0, None
@@ -345,7 +373,7 @@ class SREAgent:
 
     def _finish(self, incident, state: AgentResult, executor, assessment, stop_reason, previous_assessment) -> AgentResult:
         if assessment is None:
-            assessment = self._force_assessment(stop_reason, state.messages, openai_tools(), executor)
+            assessment = self._force_assessment(stop_reason, state.messages, self._tools(), executor)
         state.assessment = assessment
         state.stop_reason = stop_reason
         state.timeline.extend(investigation_entries(self.now(), previous_assessment, assessment, stop_reason, state.cycle))

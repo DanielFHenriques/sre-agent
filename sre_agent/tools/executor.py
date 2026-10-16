@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol
 
 from sre_agent.models import IncidentRef, ProposedAction, SideEffect, ToolCallRecord
 from sre_agent.tools.registry import REGISTRY
+from sre_agent.timeline import utc_now
 from sre_agent.triage import fast_track_reason
 
 
@@ -44,6 +45,8 @@ class ToolExecutor:
         prior_proposals: list[ProposedAction] | None = None,
         prior_log: list[ToolCallRecord] | None = None,
         allowed_tools: set[str] | None = None,
+        local_servers: dict[str, Any] | None = None,
+        now: Callable[[], str] = utc_now,
     ):
         self.mcp = mcp
         self.incident = incident
@@ -51,6 +54,11 @@ class ToolExecutor:
         self.clock = clock
         # None = every registered tool. The question-answering path passes only the read tools.
         self.allowed_tools = allowed_tools
+        # First-party "servers" (the agent's memory) handled in-process instead of over MCP.
+        self.local_servers = local_servers or {}
+        self.now = now
+        self._related_services: set[str] = set()  # downstream dependencies, for memory recall
+        self._seen_memory_fixes: list[dict[str, Any]] = []  # verified fixes recalled from memory
         # The prior_* arguments let a resumed investigation carry forward what this incident already tried.
         self.proposed_actions: list[ProposedAction] = list(prior_proposals or [])
         self.log: list[ToolCallRecord] = list(prior_log or [])
@@ -115,7 +123,12 @@ class ToolExecutor:
     def _call_mcp(self, server: str | None, tool: str, args: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         assert server is not None
         try:
-            result = self.mcp.call_tool(server, tool, args, tenant_id=self.incident.tenant_id, timeout_s=timeout_s)
+            if server in self.local_servers:
+                result = self.local_servers[server].call_tool(
+                    tool, args, tenant_id=self.incident.tenant_id, now=self.now(), related=self._related_services
+                )
+            else:
+                result = self.mcp.call_tool(server, tool, args, tenant_id=self.incident.tenant_id, timeout_s=timeout_s)
         except TimeoutError:
             return {"error": "timeout", "detail": f"{server}.{tool} did not answer within {timeout_s}s"}
         except Exception as e:  # MCP server down, auth expired, rate limited...
@@ -131,6 +144,11 @@ class ToolExecutor:
             self._seen_metrics[result["metric"]] = result
         if isinstance(result.get("incidents"), list):
             self._seen_similar = result["incidents"]
+        if isinstance(result.get("downstream"), list):
+            self._related_services = set(result["downstream"])
+        for m in result.get("memories", []) if isinstance(result.get("memories"), list) else []:
+            for action in m.get("verified_actions", []):
+                self._seen_memory_fixes.append({"incident_id": m["incident_id"], "resolution_action": action, "verified": True})
 
     # --- action proposals ------------------------------------------------------------------
 
@@ -181,7 +199,7 @@ class ToolExecutor:
                 if existing.status == "rejected":
                     raise ToolRejected(f"{action} {params} was rejected by {existing.decided_by}. Do not re-propose.")
         a_fix_failed = any(p.verification_verdict == "did_not_work" for p in self.proposed_actions)
-        fast_track = fast_track_reason(self.triage, action, self._seen_similar, a_fix_failed)
+        fast_track = fast_track_reason(self.triage, action, self._seen_similar + self._seen_memory_fixes, a_fix_failed)
         self.proposed_actions.append(
             ProposedAction(
                 action=action,

@@ -154,12 +154,16 @@ def fast_track_reason(
     may approve it, not whether approval is needed. All conditions, decided by code:
       - it is a rollback to the previous (known stable) version, the lowest-risk action in the catalog;
       - triage says low impact: SEV-4/5 *and* we positively know customers aren't reporting it;
-      - the same action fixed this service before, verified, at least FAST_TRACK_MIN_VERIFIED times;
+      - the same action fixed this service before, verified, at least FAST_TRACK_MIN_VERIFIED times
+        (from PagerDuty's labelled history or the agent's memory, where "verified" was decided by code);
       - nothing has already failed in this incident (then we are not in a known situation).
     """
     if action != "rollback_deploy" or t is None or t["response_mode"] != "low" or a_fix_already_failed:
         return None
-    verified = [i for i in similar_incidents if i.get("resolution_action") == action and i.get("verified")]
+    # PagerDuty history and the agent's own memory can describe the same incident: count each once.
+    verified = list({
+        i["incident_id"]: i for i in similar_incidents if i.get("resolution_action") == action and i.get("verified")
+    }.values())
     if len(verified) < FAST_TRACK_MIN_VERIFIED:
         return None
     ids = ", ".join(i["incident_id"] for i in verified)

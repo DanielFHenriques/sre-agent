@@ -124,6 +124,29 @@ SEARCH_SIMILAR_INCIDENTS = function_tool(
     },
 )
 
+MEMORY_RECALL = function_tool(
+    "memory_recall",
+    "The agent's own memory of past incidents on this service (and services it depends on): fixes that "
+    "verified, fixes that ran and did NOT work, and causes that were ruled out. Search by the main error "
+    "signature and which metrics moved. Returns nothing when nothing is similar enough; that is normal.",
+    {
+        "service_id": SERVICE_ID,
+        "error_signature": {"type": "string", "description": "The main error log template you are seeing."},
+        "changed_metrics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "metric": {"type": "string", "enum": METRICS},
+                    "direction": {"type": "string", "enum": ["up", "down"]},
+                },
+                "required": ["metric", "direction"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
+
 GET_RUNBOOK = function_tool(
     "runbook_get",
     "The service's runbook: known failure modes and the approved remediations for each.",
