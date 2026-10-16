@@ -22,6 +22,9 @@ def rollback_args(**overrides):
         "team": None,
         "rationale": "New NPE since v2.14.0",
         "evidence": ["NPE first seen 02:53:40, deploy at 02:51"],
+        "risk": {"level": "low", "description": "Reverts the BNPL change too."},
+        "expected_effect": "error_rate back to baseline within 5 min.",
+        "how_to_verify": {"metric": "error_rate", "comparison": "below", "threshold": 0.01, "within_minutes": 10},
     }
     args.update(overrides)
     return json.dumps(args)
@@ -35,6 +38,8 @@ class OpenAISpecTest(unittest.TestCase):
                 self.assertEqual(set(schema["required"]), set(schema["properties"]), where)
                 for k, sub in schema["properties"].items():
                     check_strict(sub, f"{where}.{k}")
+            for i, option in enumerate(schema.get("anyOf", [])):
+                check_strict(option, f"{where}|{i}")
             if "items" in schema:
                 check_strict(schema["items"], f"{where}[]")
 
@@ -91,6 +96,28 @@ class ExecutorTest(unittest.TestCase):
         self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
         out = self.ex.execute("propose_action", rollback_args(deploy_id="dep-9999"))
         self.assertEqual(out["error"], "rejected")
+
+    def test_remediation_without_verification_rejected(self):
+        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify=None))
+        self.assertEqual(out["error"], "rejected")
+        self.assertIn("how_to_verify", out["detail"])
+
+    def test_empty_risk_rejected(self):
+        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        out = self.ex.execute("propose_action", rollback_args(risk={"level": "low", "description": " "}))
+        self.assertEqual(out["error"], "rejected")
+
+    def test_malformed_verification_rejected_by_schema(self):
+        self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))
+        out = self.ex.execute("propose_action", rollback_args(how_to_verify={"metric": "error_rate"}))
+        self.assertEqual(out["error"], "rejected")
+        self.assertIn("no allowed shape", out["detail"])
+
+    def test_page_team_needs_no_metric_check(self):
+        args = json.loads(rollback_args(action="page_team", deploy_id=None, team="team-payments", how_to_verify=None))
+        out = self.ex.execute("propose_action", json.dumps(args))
+        self.assertEqual(out["status"], "pending_approval")
 
     def test_proposal_never_reaches_an_mcp_server(self):
         self.ex.execute("changes_list_recent", json.dumps({"service_id": SERVICE, "lookback_minutes": 120}))

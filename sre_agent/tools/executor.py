@@ -127,12 +127,29 @@ class ToolExecutor:
         if action == "scale_out" and not 1 <= args["replicas"] <= 50:
             raise ToolRejected("replicas must be between 1 and 50")
 
+        # The Incident Commander cannot decide without knowing the risk, or tell later whether it worked.
+        if not args["risk"]["description"].strip() or not args["expected_effect"].strip():
+            raise ToolRejected("risk.description and expected_effect must say something")
+        verify = args["how_to_verify"]
+        if action != "page_team" and verify is None:
+            raise ToolRejected(f"{action} needs how_to_verify: a metric check that shows it worked")
+        if verify is not None and not 1 <= verify["within_minutes"] <= 60:
+            raise ToolRejected("how_to_verify.within_minutes must be between 1 and 60")
+
         params = {p: args[p] for p in ["target_service", *needed]}
         for existing in self.proposed_actions:
             if existing.action == action and existing.params == params:
                 return {"status": "pending_approval", "note": "Already proposed. Waiting on a human."}
         self.proposed_actions.append(
-            ProposedAction(action=action, params=params, rationale=args["rationale"], evidence=args["evidence"])
+            ProposedAction(
+                action=action,
+                params=params,
+                rationale=args["rationale"],
+                evidence=args["evidence"],
+                risk=args["risk"],
+                expected_effect=args["expected_effect"],
+                how_to_verify=verify,
+            )
         )
         return {
             "status": "pending_approval",
@@ -152,6 +169,14 @@ def _validate(schema: dict[str, Any], value: Any, path: str) -> None:
     OpenAI strict mode already guarantees this for its models; we re-check because the executor
     must not trust whichever model (or mock) is on the other side.
     """
+    if "anyOf" in schema:
+        errors = []
+        for option in schema["anyOf"]:
+            try:
+                return _validate(option, value, path)
+            except ToolRejected as e:
+                errors.append(str(e))
+        raise ToolRejected(f"{path}: matches no allowed shape ({'; '.join(errors)})")
     types = schema.get("type")
     types = types if isinstance(types, list) else [types]
     checks = {
@@ -159,6 +184,7 @@ def _validate(schema: dict[str, Any], value: Any, path: str) -> None:
         "array": lambda v: isinstance(v, list),
         "string": lambda v: isinstance(v, str),
         "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
         "boolean": lambda v: isinstance(v, bool),
         "null": lambda v: v is None,
     }

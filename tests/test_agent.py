@@ -52,6 +52,26 @@ class AgentScenarioTest(unittest.TestCase):
         self.assertEqual(result.proposed_actions, [])
         self.assertEqual(result.assessment["confidence"], "low")
 
+    def test_assessment_leads_with_business_impact(self):
+        result, _ = run("bad_deploy")
+        impact = result.assessment["impact"]
+        self.assertEqual(impact["business_metric"], "successful checkouts per minute")
+        self.assertEqual(impact["change_pct"], -20.0)
+        self.assertEqual(impact["suggested_severity"], "SEV-2")
+
+    def test_impact_unknown_when_kpi_unavailable(self):
+        result, _ = run("bad_deploy", failing={"datadog_query_metrics"})
+        self.assertEqual(result.assessment["impact"]["suggested_severity"], "unknown")
+
+    def test_every_proposal_has_risk_and_remediations_are_verifiable(self):
+        for scenario in ("bad_deploy", "dependency_outage"):
+            result, _ = run(scenario)
+            for p in result.proposed_actions:
+                self.assertTrue(p.risk["description"])
+                self.assertTrue(p.expected_effect)
+                if p.action != "page_team":
+                    self.assertIsNotNone(p.how_to_verify, f"{scenario}: {p.action}")
+
     def test_nothing_executes_actions(self):
         result, mcp = run("bad_deploy")
         self.assertTrue(result.proposed_actions)

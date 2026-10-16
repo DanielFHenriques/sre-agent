@@ -28,6 +28,9 @@ class ProposedAction:
     params: dict[str, Any]
     rationale: str
     evidence: list[str]
+    risk: dict[str, Any]
+    expected_effect: str
+    how_to_verify: dict[str, Any] | None  # machine-checkable, so a verify step can run it later
     status: str = "pending_approval"
 
 

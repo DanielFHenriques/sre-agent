@@ -27,6 +27,7 @@ _INCIDENT = {
 _SERVICE_CONTEXT = {
     "service_id": SERVICE,
     "owning_team": "team-checkout",
+    "business_kpi": "successful checkouts per minute",
     "on_call": {"primary": "responder@acme.example", "escalation_policy": "checkout-ep"},
     "upstream": ["web-frontend", "mobile-bff"],
     "downstream": ["payments-gateway", "inventory-svc", "checkout-db"],
@@ -84,6 +85,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             "monitors": [{"name": "checkout-api error rate", "service": SERVICE, "since": "2026-10-16T02:56:00Z"}]
         },
         "datadog_query_metrics": {
+            "business_kpi": _metric(950, 760, "2026-10-16T02:54:00Z"),
             "error_rate": _metric(0.004, 0.21, "2026-10-16T02:54:00Z"),
             "latency_p99": _metric(420, 460, None),
             "request_rate": _metric(1800, 1790, None),
@@ -144,6 +146,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             ]
         },
         "datadog_query_metrics": {
+            "business_kpi": _metric(950, 740, "2026-10-16T02:54:00Z"),
             "error_rate": _metric(0.004, 0.19, "2026-10-16T02:54:00Z"),
             "latency_p99": _metric(420, 5100, "2026-10-16T02:53:00Z"),
             "request_rate": _metric(1800, 1810, None),

@@ -124,9 +124,9 @@ its risk is not decidable. So each proposal should carry:
 
 | IC question | Field (today) | Gap |
 |---|---|---|
-| What's wrong? | `submit_assessment.summary`, `hypotheses` | No impact or scope statement (who is affected, how much) |
+| What's wrong? | `submit_assessment.impact`, `summary`, `hypotheses` | Done: impact from the business KPI with a suggested severity |
 | What can we do? | `propose_action` | ok |
-| What are the risks? | none | Add `risk`, `expected_effect` and `how_to_verify` to `propose_action` |
+| What are the risks? | `propose_action.risk`, `expected_effect`, `how_to_verify` | Done: the executor rejects remediations without a metric check |
 | How confident? | `confidence` | ok |
 
 **Severity from business impact, not CPU.** The course recommends tying severity to a business
@@ -139,8 +139,8 @@ repeat:
 
 | Cycle step | Agent today | To add |
 |---|---|---|
-| Size up | prefetch + investigation | impact statement |
-| Stabilize | `propose_action` (approval-gated) | risk per proposal |
+| Size up | prefetch + investigation + impact | |
+| Stabilize | `propose_action` (approval-gated, with risk) | |
 | Update | final assessment only | timeline entries as decisions happen (Scribe), not a stream of chat |
 | Verify | none | After an approved action, re-query the same metrics and say whether it worked. The brief asks for this too. |
 

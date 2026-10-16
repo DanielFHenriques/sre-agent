@@ -61,16 +61,16 @@ LIST_TRIGGERED_MONITORS = function_tool(
     {"service_id": SERVICE_ID},
 )
 
+METRICS = ["business_kpi", "error_rate", "latency_p99", "request_rate", "cpu", "memory", "db_pool_usage"]
+
 QUERY_METRICS = function_tool(
     "datadog_query_metrics",
     "Time series for one service metric with a summary (baseline, current, change point). "
-    "Look for step changes and when they started, not just high values.",
+    "Look for step changes and when they started, not just high values. 'business_kpi' is the "
+    "service's business metric (named in the service context); use it to size customer impact.",
     {
         "service_id": SERVICE_ID,
-        "metric": {
-            "type": "string",
-            "enum": ["error_rate", "latency_p99", "request_rate", "cpu", "memory", "db_pool_usage"],
-        },
+        "metric": {"type": "string", "enum": METRICS},
         "lookback_minutes": LOOKBACK,
     },
 )
@@ -134,6 +134,38 @@ PROPOSE_ACTION = function_tool(
             "items": {"type": "string"},
             "description": "Concrete facts from tool results that support this action.",
         },
+        "risk": {
+            "type": "object",
+            "description": "What could go wrong if this is approved, and how far it would spread.",
+            "properties": {
+                "level": {"type": "string", "enum": ["low", "medium", "high"]},
+                "description": {"type": "string"},
+            },
+            "required": ["level", "description"],
+            "additionalProperties": False,
+        },
+        "expected_effect": {
+            "type": "string",
+            "description": "What should change if this works, and how quickly.",
+        },
+        "how_to_verify": {
+            "description": "A measurable check that the action worked, so it can be verified afterwards. "
+            "Required for remediations; null for page_team.",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "metric": {"type": "string", "enum": METRICS},
+                        "comparison": {"type": "string", "enum": ["below", "above"]},
+                        "threshold": {"type": "number"},
+                        "within_minutes": {"type": "integer"},
+                    },
+                    "required": ["metric", "comparison", "threshold", "within_minutes"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ],
+        },
     },
 )
 
@@ -153,10 +185,28 @@ HYPOTHESIS = {
 
 SUBMIT_ASSESSMENT = function_tool(
     "submit_assessment",
-    "Finish the investigation. Call exactly once, last. Ranked hypotheses, the recommended next step, "
-    "and what is still unknown (including any data source that failed).",
+    "Finish the investigation. Call exactly once, last. Customer impact first, then ranked hypotheses, "
+    "the recommended next step, and what is still unknown (including any data source that failed).",
     {
         "summary": {"type": "string", "description": "Three sentences max, for the responder's first read."},
+        "impact": {
+            "type": "object",
+            "description": "Size-up in business terms: who is affected and how much. Not CPU graphs.",
+            "properties": {
+                "business_metric": {"type": "string", "description": "e.g. 'successful checkouts per minute'."},
+                "baseline": {"type": ["number", "null"]},
+                "current": {"type": ["number", "null"]},
+                "change_pct": {"type": ["number", "null"], "description": "Negative means a drop."},
+                "scope": {"type": "string", "description": "Who or what is affected, in plain words."},
+                "suggested_severity": {
+                    "type": "string",
+                    "enum": ["SEV-1", "SEV-2", "SEV-3", "SEV-4", "SEV-5", "unknown"],
+                    "description": "A suggestion for the Incident Commander to confirm; SEV-1 is the worst.",
+                },
+            },
+            "required": ["business_metric", "baseline", "current", "change_pct", "scope", "suggested_severity"],
+            "additionalProperties": False,
+        },
         "hypotheses": {"type": "array", "items": HYPOTHESIS},
         "recommended_next_step": {"type": "string"},
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},

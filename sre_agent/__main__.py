@@ -52,6 +52,9 @@ def main() -> None:
     print("\n" + "=" * 78)
     print(f"ASSESSMENT  confidence={a.get('confidence')}  stop={result.stop_reason}  model_steps={result.steps}")
     print(f"  {a.get('summary')}")
+    impact = a.get("impact") or {}
+    if impact:
+        print(f"  IMPACT  suggested {impact['suggested_severity']} (Incident Commander to confirm): {impact['scope']}")
     for h in a.get("hypotheses", []):
         print(f"  - [{h['confidence']}] {h['cause']}")
         for e in h["evidence_for"]:
@@ -64,7 +67,12 @@ def main() -> None:
     print("\nAWAITING YOUR APPROVAL (nothing has been executed):")
     for i, p in enumerate(result.proposed_actions, 1):
         params = ", ".join(f"{k}={v}" for k, v in p.params.items())
-        print(f"  [{i}] {p.action}({params})\n      why: {p.rationale}")
+        print(f"  [{i}] {p.action}({params})\n      why:    {p.rationale}")
+        print(f"      risk:   [{p.risk['level']}] {p.risk['description']}")
+        print(f"      expect: {p.expected_effect}")
+        if p.how_to_verify:
+            v = p.how_to_verify
+            print(f"      verify: {v['metric']} {v['comparison']} {v['threshold']} within {v['within_minutes']} min")
     if not result.proposed_actions:
         print("  (none)")
 

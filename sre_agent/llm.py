@@ -66,8 +66,9 @@ class MockReasoningLLM:
 
         if not forced and not seen.called("datadog_search_logs"):
             return self._calls(
-                "Checking error and latency trend, error logs, and dependency health in parallel.",
+                "Sizing up customer impact, error and latency trend, error logs, and dependency health in parallel.",
                 [
+                    ("datadog_query_metrics", {"service_id": service, "metric": "business_kpi", "lookback_minutes": window}),
                     ("datadog_query_metrics", {"service_id": service, "metric": "error_rate", "lookback_minutes": window}),
                     ("datadog_query_metrics", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
                     ("datadog_search_logs", {"service_id": service, "level": "error", "query": None, "lookback_minutes": window}),
@@ -122,6 +123,12 @@ class _Seen:
         entries = self.by_tool.get(name)
         return entries[-1][1] if entries else None
 
+    def metric(self, name: str) -> dict[str, Any] | None:
+        for args, out in reversed(self.by_tool.get("datadog_query_metrics", [])):
+            if args.get("metric") == name:
+                return out
+        return None
+
     def failed(self) -> list[str]:
         return [n for n, entries in self.by_tool.items() if any("error" in out for _, out in entries)]
 
@@ -160,6 +167,7 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
         if d["error_rate"] >= 0.05 and d["error_rate"] >= 10 * max(d["baseline_error_rate"], 0.001)
     ]
 
+    impact = _impact(seen)
     hypotheses: list[dict[str, Any]] = []
     proposals: list[dict[str, Any]] = []
     open_questions = [f"{name} failed; that evidence is missing." for name in failed]
@@ -185,6 +193,14 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
             f"{suspect['version']} shipped; dependencies are healthy. "
             f"Roll back to {suspect['previous_version']}.",
             "evidence": evidence,
+            "risk": {
+                "level": "low",
+                "description": f"Reverts everything in {suspect['version']} ({suspect['summary']}). "
+                "If it included a schema migration, check that first. Rolling restart, no downtime expected.",
+            },
+            "expected_effect": f"error_rate back near baseline ({_baseline(seen, 'error_rate')}) within about "
+            "5 min of the rollout finishing.",
+            "how_to_verify": {"metric": "error_rate", "comparison": "below", "threshold": 0.01, "within_minutes": 10},
         })
         next_step = f"Approve rollback of {suspect['deploy_id']} to {suspect['previous_version']}, then watch error_rate for 10 min."
         note = f"{suspect['version']} shipped just before onset and dependencies are healthy. Proposing a rollback."
@@ -218,6 +234,13 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
                 "flag_value": flag.group(2) == "true",
                 "rationale": f"Runbook mitigation for {dep['service']} failures: queue payments for retry instead of failing checkout.",
                 "evidence": evidence,
+                "risk": {
+                    "level": "medium",
+                    "description": "Orders are accepted before payment is confirmed. Some will fail later and "
+                    "need customer follow-up. Turn the flag off once payments-gateway recovers.",
+                },
+                "expected_effect": "Checkout stops failing on payment timeouts; error_rate drops within a few minutes.",
+                "how_to_verify": {"metric": "error_rate", "comparison": "below", "threshold": 0.02, "within_minutes": 5},
             })
         team = re.search(r"page (team-[\w-]+)", json.dumps(runbook))
         if team:
@@ -228,6 +251,9 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
                 "team": team.group(1),
                 "rationale": f"{dep['service']} is the source; its owners need to be engaged.",
                 "evidence": evidence[:1],
+                "risk": {"level": "low", "description": "Wakes up the payments on-call. No change to production."},
+                "expected_effect": f"{team.group(1)} acknowledges and starts on {dep['service']}.",
+                "how_to_verify": None,
             })
         next_step = "Do not roll back. Approve the fallback flag and page the dependency owner."
         note = f"{dep['service']} is failing, not us. Proposing the runbook mitigation instead of a rollback."
@@ -241,6 +267,7 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
         confidence = "medium"  # never high confidence on partial evidence
     summary = (
         f"{incident.get('title', 'Incident')}. "
+        + (f"Impact: {impact['scope']}. " if impact["change_pct"] is not None else "")
         + (f"Most likely: {hypotheses[0]['cause']}. " if hypotheses else "Cause unclear. ")
         + f"Next: {next_step}"
     )
@@ -249,9 +276,35 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
         "proposals": proposals,
         "assessment": {
             "summary": summary,
+            "impact": impact,
             "hypotheses": hypotheses,
             "recommended_next_step": next_step,
             "confidence": confidence,
             "open_questions": open_questions,
         },
+    }
+
+
+def _baseline(seen: _Seen, metric: str) -> Any:
+    return (seen.metric(metric) or {}).get("baseline", "unknown")
+
+
+def _impact(seen: _Seen) -> dict[str, Any]:
+    """Severity from the business metric, per PagerDuty's guidance. Thresholds are illustrative."""
+    label = (seen.latest("pagerduty_get_service_context") or {}).get("business_kpi", "business KPI")
+    kpi = seen.metric("business_kpi") or {}
+    if "baseline" not in kpi:
+        return {"business_metric": label, "baseline": None, "current": None, "change_pct": None,
+                "scope": "Unknown: the business metric could not be read", "suggested_severity": "unknown"}
+    change = round((kpi["current"] - kpi["baseline"]) / kpi["baseline"] * 100, 1)
+    drop = -change
+    severity = ("SEV-1" if drop >= 50 else "SEV-2" if drop >= 20 else "SEV-3" if drop >= 5
+                else "SEV-4" if drop > 0 else "SEV-5")
+    return {
+        "business_metric": label,
+        "baseline": kpi["baseline"],
+        "current": kpi["current"],
+        "change_pct": change,
+        "scope": f"{label} down {drop:.0f}% ({kpi['baseline']} -> {kpi['current']}), all customers of this service",
+        "suggested_severity": severity,
     }
