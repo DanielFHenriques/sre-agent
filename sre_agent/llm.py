@@ -59,15 +59,30 @@ class MockReasoningLLM:
 
     def complete(self, messages, tools, tool_choice="auto"):
         seen = _tool_results(messages)
+        # After a failed fix, "have I done X yet?" only counts what happened since the re-investigate request.
+        resumed_at = max((i for i, m in enumerate(messages) if str(m.get("content") or "").startswith("[re-investigate]")), default=None)
+        phase = _tool_results(messages, since=resumed_at or 0)
+        tried = {
+            match.group(1)
+            for m in messages
+            if (match := re.match(r"\[automation\] (\w+) .*Verification: did_not_work", str(m.get("content") or "")))
+        }
         forced = isinstance(tool_choice, dict) and tool_choice["function"]["name"] == "submit_assessment"
         incident = seen.latest("pagerduty_get_incident") or {}
         service = incident.get("service_id", "unknown")
         window = 30
 
-        if not forced and not seen.called("datadog_search_logs"):
+        if not forced and not phase.called("datadog_search_logs"):
+            wider = [
+                ("datadog_query_metrics", {"service_id": service, "metric": m, "lookback_minutes": window})
+                for m in ("request_rate", "db_pool_usage", "cpu")
+            ] if resumed_at is not None else []
             return self._calls(
-                "Sizing up customer impact, error and latency trend, error logs, and dependency health in parallel.",
-                [
+                f"{', '.join(sorted(tried))} did not fix it, so my first hypothesis was wrong. Re-reading everything "
+                "fresh and looking wider: traffic and saturation too."
+                if resumed_at is not None
+                else "Sizing up customer impact, error and latency trend, error logs, and dependency health in parallel.",
+                wider + [
                     ("datadog_query_metrics", {"service_id": service, "metric": "business_kpi", "lookback_minutes": window}),
                     ("datadog_query_metrics", {"service_id": service, "metric": "error_rate", "lookback_minutes": window}),
                     ("datadog_query_metrics", {"service_id": service, "metric": "latency_p99", "lookback_minutes": window}),
@@ -76,7 +91,7 @@ class MockReasoningLLM:
                 ],
             )
 
-        if not forced and not seen.called("runbook_get"):
+        if not forced and not phase.called("runbook_get"):
             logs = seen.latest("datadog_search_logs") or {}
             top = (logs.get("patterns") or [{}])[0].get("template", "elevated 5xx error rate")
             return self._calls(
@@ -87,8 +102,8 @@ class MockReasoningLLM:
                 ],
             )
 
-        decision = _decide(seen, incident)
-        if not forced and decision["proposals"] and not seen.called("propose_action"):
+        decision = _decide(seen, incident, tried)
+        if not forced and decision["proposals"] and not phase.called("propose_action"):
             return self._calls(decision["note"], [("propose_action", p) for p in decision["proposals"]])
         return self._calls(None, [("submit_assessment", decision["assessment"])])
 
@@ -133,19 +148,19 @@ class _Seen:
         return [n for n, entries in self.by_tool.items() if any("error" in out for _, out in entries)]
 
 
-def _tool_results(messages: list[dict[str, Any]]) -> _Seen:
+def _tool_results(messages: list[dict[str, Any]], since: int = 0) -> _Seen:
     calls: dict[str, tuple[str, dict[str, Any]]] = {}
     seen = _Seen()
-    for m in messages:
+    for i, m in enumerate(messages):
         for c in m.get("tool_calls") or []:
             calls[c["id"]] = (c["function"]["name"], json.loads(c["function"]["arguments"]))
-        if m["role"] == "tool" and m["tool_call_id"] in calls:
+        if i >= since and m["role"] == "tool" and m["tool_call_id"] in calls:
             name, args = calls[m["tool_call_id"]]
             seen.by_tool.setdefault(name, []).append((args, json.loads(m["content"])))
     return seen
 
 
-def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
+def _decide(seen: _Seen, incident: dict[str, Any], tried: set[str] = frozenset()) -> dict[str, Any]:
     service = incident.get("service_id", "unknown")
     onset = _ts(incident["onset_estimate"]) if "onset_estimate" in incident else None
     failed = seen.failed()
@@ -167,13 +182,59 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
         if d["error_rate"] >= 0.05 and d["error_rate"] >= 10 * max(d["baseline_error_rate"], 0.001)
     ]
 
+    request_rate, pool = seen.metric("request_rate") or {}, seen.metric("db_pool_usage") or {}
+    saturated = (
+        request_rate.get("current", 0) >= 1.5 * request_rate.get("baseline", float("inf"))
+        and pool.get("current", 0) >= 0.9
+    )
+
     impact = _impact(seen)
     hypotheses: list[dict[str, Any]] = []
     proposals: list[dict[str, Any]] = []
     open_questions = [f"{name} failed; that evidence is missing." for name in failed]
     blank = {"deploy_id": None, "flag_name": None, "flag_value": None, "replicas": None, "team": None}
 
-    if suspect and deps_known and not degraded:
+    if suspect and "rollback_deploy" in tried:
+        # Keep the ruled-out hypothesis visible, with the reason it was ruled out.
+        hypotheses.append({
+            "cause": f"Bad deploy {suspect['version']}",
+            "confidence": "low",
+            "evidence_for": [f"Deploy {suspect['deploy_id']} landed at {suspect['at']}, shortly before onset"],
+            "evidence_against": ["Rollback was approved and ran, and error_rate did not recover"],
+        })
+
+    if saturated:
+        replicas = re.search(r"scale_out to (\d+) replicas", json.dumps(runbook))
+        evidence = [
+            f"request_rate {request_rate['baseline']} -> {request_rate['current']} from {request_rate['change_point']}",
+            f"db_pool_usage {pool['baseline']:.0%} -> {pool['current']:.0%}",
+            *[f"Log pattern: {p['template']}" for p in logs.get("patterns", [])[:1]],
+        ]
+        hypotheses.insert(0, {
+            "cause": "Traffic spike exhausting the database connection pool",
+            "confidence": "high",
+            "evidence_for": evidence,
+            "evidence_against": [],
+        })
+        if replicas:
+            proposals.append({
+                "action": "scale_out",
+                "target_service": service,
+                **blank,
+                "replicas": int(replicas.group(1)),
+                "rationale": "Traffic nearly doubled and the DB pool is full; the runbook says scale out for this.",
+                "evidence": evidence,
+                "risk": {
+                    "level": "medium",
+                    "description": "More replicas means more DB connections in total. Check checkout-db's "
+                    "max_connections has headroom, or the database becomes the bottleneck.",
+                },
+                "expected_effect": "Pool usage drops below 80% and errors stop within about 10 min as new pods warm up.",
+                "how_to_verify": {"metric": "error_rate", "comparison": "below", "threshold": 0.01, "within_minutes": 10},
+            })
+        next_step = f"Approve scale_out to {replicas.group(1) if replicas else 'more'} replicas; watch db_pool_usage and error_rate."
+        note = "Traffic and DB pool saturation explain it, not the deploy. Proposing scale-out."
+    elif suspect and deps_known and not degraded and "rollback_deploy" not in tried:
         evidence = [f"Deploy {suspect['deploy_id']} ({suspect['version']}) at {suspect['at']}, onset {incident['onset_estimate']}"]
         evidence += [f"New error pattern first seen {p['first_seen']}: {p['template']}" for p in new_patterns]
         evidence.append("All downstream dependencies at baseline error rates")
@@ -257,6 +318,10 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
             })
         next_step = "Do not roll back. Approve the fallback flag and page the dependency owner."
         note = f"{dep['service']} is failing, not us. Proposing the runbook mitigation instead of a rollback."
+    elif tried:
+        next_step = f"Already tried without effect: {', '.join(sorted(tried))}. No new evidence-backed fix; escalate."
+        note = ""
+        open_questions.append("The fix that matched the evidence did not work; something not in these tools is involved.")
     else:
         next_step = "No safe action yet. Check the open questions first."
         note = ""

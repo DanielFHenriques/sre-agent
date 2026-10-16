@@ -34,6 +34,7 @@ class ProposedAction:
     # pending_approval -> approved -> executed | execution_failed ; or pending_approval -> rejected
     status: str = "pending_approval"
     decided_by: str | None = None
+    verification_verdict: str | None = None
 
 
 @dataclass
@@ -67,3 +68,4 @@ class AgentResult:
     proposed_actions: list[ProposedAction] = field(default_factory=list)
     tool_log: list[ToolCallRecord] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
+    cycle: int = 1  # 1 = first investigation, 2+ = re-investigation after a failed fix

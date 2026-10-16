@@ -35,15 +35,19 @@ class ToolExecutor:
         incident: IncidentRef,
         max_output_chars: int = 4000,
         clock: Callable[[], float] = time.perf_counter,
+        known_deploy_ids: set[str] | None = None,
+        prior_proposals: list[ProposedAction] | None = None,
+        prior_log: list[ToolCallRecord] | None = None,
     ):
         self.mcp = mcp
         self.incident = incident
         self.max_output_chars = max_output_chars
         self.clock = clock
-        self.proposed_actions: list[ProposedAction] = []
-        self.log: list[ToolCallRecord] = []
+        # The prior_* arguments let a resumed investigation carry forward what this incident already tried.
+        self.proposed_actions: list[ProposedAction] = list(prior_proposals or [])
+        self.log: list[ToolCallRecord] = list(prior_log or [])
         # Deploy ids the agent has actually seen in tool output. A rollback may only target one of these.
-        self._seen_deploy_ids: set[str] = set()
+        self._seen_deploy_ids: set[str] = set(known_deploy_ids or ())
 
     def execute(self, name: str, raw_arguments: str) -> dict[str, Any]:
         start = self.clock()
@@ -139,7 +143,14 @@ class ToolExecutor:
         params = {p: args[p] for p in ["target_service", *needed]}
         for existing in self.proposed_actions:
             if existing.action == action and existing.params == params:
-                return {"status": "pending_approval", "note": "Already proposed. Waiting on a human."}
+                if existing.verification_verdict == "did_not_work":
+                    raise ToolRejected(
+                        f"{action} {params} was already approved and run, and did not work. Propose something else."
+                    )
+                if existing.status == "pending_approval":
+                    return {"status": "pending_approval", "note": "Already proposed. Waiting on a human."}
+                if existing.status == "rejected":
+                    raise ToolRejected(f"{action} {params} was rejected by {existing.decided_by}. Do not re-propose.")
         self.proposed_actions.append(
             ProposedAction(
                 action=action,

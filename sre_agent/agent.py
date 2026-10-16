@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from sre_agent.llm import LLMClient
-from sre_agent.models import AgentResult, IncidentRef
+from sre_agent.models import AgentResult, IncidentRef, Verification
 from sre_agent.prompts import SYSTEM_PROMPT
 from sre_agent.tools.executor import MCPClient, ToolExecutor
 from sre_agent.tools.registry import openai_tools
@@ -26,6 +26,7 @@ class Budget:
     max_tool_calls: int = 20
     max_wall_clock_s: float = 120.0  # the responder should see something within ~2 min
     max_stalled_steps: int = 2  # consecutive steps that only repeat earlier calls
+    max_cycles: int = 3  # investigations per incident: the first plus re-investigations after failed fixes
 
 
 def prefetch_calls(incident: IncidentRef) -> list[tuple[str, dict[str, Any]]]:
@@ -77,6 +78,53 @@ class SREAgent:
         for call in prefetch:
             self._run_call(call, executor, messages, signatures)
 
+        return self._investigate(incident, messages, executor, signatures, started, cycle=1)
+
+    def resume(self, incident: IncidentRef, previous: AgentResult, verification: Verification) -> AgentResult:
+        """Re-investigate after an approved action did not work, on the same transcript.
+
+        Investigation is read-only, so it starts without asking. Anything it proposes still needs
+        approval. After `max_cycles` investigations the agent stops proposing and hands back to humans,
+        so it cannot loop on remediation in the middle of an outage.
+        """
+        if verification.verdict != "did_not_work":
+            raise ValueError(f"resume is for failed fixes, got verdict '{verification.verdict}'")
+        started = self.clock()
+        messages = list(previous.messages)
+        # A fresh executor that remembers what this incident has already seen and tried.
+        executor = ToolExecutor(
+            self.mcp,
+            incident,
+            known_deploy_ids=deploy_ids_in(messages),
+            prior_proposals=previous.proposed_actions,
+            prior_log=previous.tool_log,
+        )
+        cycle = previous.cycle + 1
+        if cycle > self.budget.max_cycles:
+            return AgentResult(
+                incident_id=incident.incident_id,
+                stop_reason="cycle_limit",
+                steps=0,
+                assessment=_escalation(previous, verification),
+                proposed_actions=executor.proposed_actions,
+                tool_log=executor.log,
+                messages=messages,
+                cycle=previous.cycle,
+            )
+
+        self._append(messages, {
+            "role": "user",
+            "content": f"[re-investigate] The approved {verification.action} did not work: {verification.detail} "
+            "Your leading hypothesis is probably wrong. Fetch fresh data (earlier results are stale now), "
+            "look wider than last time (traffic, saturation, dependencies), and do not propose the same "
+            "action again.",
+        })
+        # Fresh signatures: re-reading a metric after an action is new information, not a stall.
+        return self._investigate(incident, messages, executor, set(), started, cycle=cycle)
+
+    def _investigate(self, incident, messages, executor: ToolExecutor, signatures, started, cycle) -> AgentResult:
+        tools = openai_tools()
+        calls_before = len(executor.log)
         steps, stalled, assessment = 0, 0, None
         stop_reason = "step_budget"
         while steps < self.budget.max_steps:
@@ -93,7 +141,7 @@ class SREAgent:
 
             new_info = False
             for call in calls:
-                if len(executor.log) >= self.budget.max_tool_calls:
+                if len(executor.log) - calls_before >= self.budget.max_tool_calls:
                     # Every tool_call_id must get a reply or the next request is invalid.
                     self._reply(messages, call, {"error": "tool_budget_exhausted"})
                     continue
@@ -108,7 +156,7 @@ class SREAgent:
             if stalled >= self.budget.max_stalled_steps:
                 stop_reason = "stalled"
                 break
-            if len(executor.log) >= self.budget.max_tool_calls:
+            if len(executor.log) - calls_before >= self.budget.max_tool_calls:
                 stop_reason = "tool_budget"
                 break
 
@@ -123,6 +171,7 @@ class SREAgent:
             proposed_actions=executor.proposed_actions,
             tool_log=executor.log,
             messages=messages,
+            cycle=cycle,
         )
 
     # -------------------------------------------------------------------------------------------
@@ -180,3 +229,36 @@ class SREAgent:
     def _append(self, messages, message: dict[str, Any]) -> None:
         messages.append(message)
         self.on_message(message)
+
+
+def deploy_ids_in(messages: list[dict[str, Any]]) -> set[str]:
+    """Deploy ids shown by tool results in the transcript, so a resumed executor keeps its rollback guardrail."""
+    ids: set[str] = set()
+    for m in messages:
+        if m["role"] != "tool":
+            continue
+        try:
+            content = json.loads(m["content"])
+        except json.JSONDecodeError:
+            continue
+        for change in content.get("changes", []) if isinstance(content, dict) else []:
+            if "deploy_id" in change:
+                ids.add(change["deploy_id"])
+    return ids
+
+
+def _escalation(previous: AgentResult, verification: Verification) -> dict[str, Any]:
+    """Deterministic hand-back to humans once the cycle limit is hit. No model call, no new proposals."""
+    tried = [f"{p.action} {p.params}" for p in previous.proposed_actions if p.verification_verdict == "did_not_work"]
+    return {
+        "summary": f"{len(tried)} approved fixes did not work. The agent has stopped proposing fixes; "
+        "this needs a human-led investigation.",
+        "impact": (previous.assessment or {}).get("impact") or {
+            "business_metric": "unknown", "baseline": None, "current": None, "change_pct": None,
+            "scope": "unknown", "suggested_severity": "unknown",
+        },
+        "hypotheses": [],
+        "recommended_next_step": "Escalate to the owning team's senior on-call. Fixes already tried: " + "; ".join(tried),
+        "confidence": "low",
+        "open_questions": [f"Why did {verification.action} not help? {verification.detail}"],
+    }

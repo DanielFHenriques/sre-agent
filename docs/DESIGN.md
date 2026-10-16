@@ -162,6 +162,33 @@ decided, and why. If the agent keeps that timeline as it goes, it becomes the ha
 postmortem draft, and the input to memory for the next incident. That makes State and Memory the
 natural next areas to build.
 
+## When an approved fix does not work
+
+The `deploy_red_herring` scenario is the case that worries me most: a harmless deploy lands four
+minutes before a traffic spike exhausts the DB pool. Every signal the first pass looks at (deploy just
+before onset, new error pattern first seen after it, healthy dependencies) says "roll back", with
+high confidence. Correlation in time is the agent's strongest heuristic and also its most
+dangerous one.
+
+What happens:
+1. Verification says `did_not_work` (code decides, from the metric).
+2. `SREAgent.resume` continues **the same transcript** with a `[re-investigate]` instruction:
+   your leading hypothesis is probably wrong, earlier data is stale, look wider, do not repeat the fix.
+   Re-investigating is read-only, so it starts without asking. Anything it proposes still needs approval.
+3. The resumed executor carries forward what the incident already knows: deploy ids seen (so the
+   rollback guardrail still works), prior proposals and their outcomes, and the call log.
+4. The executor **rejects re-proposing a fix that already failed** (or was rejected by a human).
+   That is enforced in code, not left to the prompt.
+5. The ruled-out hypothesis stays in the assessment with the reason it was ruled out, so the
+   responder sees why the agent changed its mind.
+6. After `Budget.max_cycles` investigations the agent stops proposing and returns a deterministic
+   escalation listing what was tried. No model call. An agent that keeps proposing fixes mid-outage
+   is worse than one that says "this needs a human".
+
+What I would change next: the first pass should check saturation whenever the error pattern is a
+timeout or pool exhaustion, even when a deploy looks guilty. A real eval set would be built from
+cases like this: incidents where the obvious answer was wrong.
+
 ## Open questions to raise in the session
 
 - The brief refers to "the region-outage burst above", but the scenario text does not describe

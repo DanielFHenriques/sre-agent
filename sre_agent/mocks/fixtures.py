@@ -3,6 +3,9 @@
 Both page as "checkout-api 5xx error rate above 5%". They differ in the evidence:
   - bad_deploy:          a deploy 3 minutes before onset introduced a new exception. Fix: roll back.
   - dependency_outage:   no recent change; payments-gateway is failing. Rolling back would not help.
+  - deploy_red_herring:  a harmless deploy lands just before a traffic spike exhausts the DB pool.
+                         The evidence the agent looks at first says "roll back"; that fix fails, and
+                         only a wider look (traffic, saturation) finds the real cause.
 """
 
 from __future__ import annotations
@@ -206,5 +209,75 @@ EFFECTS: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
         # Rolling back a healthy service does not fix a sick dependency: no entry, nothing changes.
+    },
+}
+
+
+SCENARIOS["deploy_red_herring"] = {
+    "pagerduty_get_incident": _INCIDENT,
+    "pagerduty_get_service_context": _SERVICE_CONTEXT,
+    "changes_list_recent": {
+        "changes": [
+            {
+                "type": "deploy",
+                "deploy_id": "dep-7740",
+                "version": "v2.15.0",
+                "previous_version": "v2.14.2",
+                "at": "2026-10-16T02:50:00Z",
+                "author": "ci-bot",
+                "summary": "Copy change on the order confirmation page",
+            }
+        ]
+    },
+    "datadog_list_triggered_monitors": {
+        "monitors": [{"name": "checkout-api error rate", "service": SERVICE, "since": "2026-10-16T02:56:00Z"}]
+    },
+    "datadog_query_metrics": {
+        "business_kpi": _metric(950, 700, "2026-10-16T02:54:00Z"),
+        "error_rate": _metric(0.004, 0.17, "2026-10-16T02:54:00Z"),
+        "latency_p99": _metric(420, 2900, "2026-10-16T02:53:00Z"),
+        "request_rate": _metric(1800, 3400, "2026-10-16T02:52:00Z"),  # promo email went out
+        "cpu": _metric(0.41, 0.72, "2026-10-16T02:52:00Z"),
+        "memory": _metric(0.55, 0.58, None),
+        "db_pool_usage": _metric(0.35, 0.99, "2026-10-16T02:53:00Z"),
+    },
+    "datadog_search_logs": {
+        "patterns": [
+            {
+                "template": "Timeout acquiring connection from pool checkout-db after 3000ms",
+                "count": 3900,
+                "first_seen": "2026-10-16T02:53:50Z",
+            }
+        ]
+    },
+    "datadog_get_dependency_health": {
+        "dependencies": [
+            {"service": "payments-gateway", "error_rate": 0.002, "baseline_error_rate": 0.002, "p99_ms": 300},
+            {"service": "inventory-svc", "error_rate": 0.001, "baseline_error_rate": 0.001, "p99_ms": 95},
+            {"service": "checkout-db", "error_rate": 0.0, "baseline_error_rate": 0.0, "p99_ms": 40},
+        ]
+    },
+    "pagerduty_search_similar_incidents": {
+        "incidents": [
+            {
+                "incident_id": "PD-701",
+                "title": "checkout-api DB pool exhaustion during Black Friday promo",
+                "root_cause": "Traffic 2x normal; pool sized for baseline",
+                "resolution": "scale_out to 12 replicas",
+            }
+        ]
+    },
+    "runbook_get": _RUNBOOK,
+}
+
+EFFECTS["deploy_red_herring"] = {
+    # The rollback is not in here: it runs fine and changes nothing.
+    "scale_out": {
+        "lag_reads": 2,
+        "metrics": {
+            "error_rate": _metric(0.004, 0.005, "2026-10-16T03:24:00Z"),
+            "db_pool_usage": _metric(0.35, 0.62, "2026-10-16T03:24:00Z"),
+            "business_kpi": _metric(950, 1780, "2026-10-16T03:24:00Z"),
+        },
     },
 }

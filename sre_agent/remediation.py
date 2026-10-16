@@ -60,6 +60,7 @@ class Remediator:
         else:
             proposal.status = "executed"
             result = self._verify(proposal)
+        proposal.verification_verdict = result.verdict
         if transcript is not None:
             transcript.append({"role": "user", "content": _transcript_note(proposal, result)})
         return result
