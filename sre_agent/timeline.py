@@ -26,8 +26,9 @@ def describe(p: ProposedAction) -> str:
 
 
 def proposal_entry(now: str, p: ProposedAction) -> TimelineEntry:
+    approval = f"Fast-track, one-click approval: {p.fast_track_reason}" if p.fast_track else "Awaiting approval."
     return TimelineEntry(
-        now, "proposed", f"Proposed {describe(p)}. Risk {p.risk['level']}: {p.risk['description']} Awaiting approval.", "agent"
+        now, "proposed", f"Proposed {describe(p)}. Risk {p.risk['level']}: {p.risk['description']} {approval}", "agent"
     )
 
 

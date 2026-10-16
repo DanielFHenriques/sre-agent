@@ -6,6 +6,9 @@ Both page as "checkout-api 5xx error rate above 5%". They differ in the evidence
   - deploy_red_herring:  a harmless deploy lands just before a traffic spike exhausts the DB pool.
                          The evidence the agent looks at first says "roll back"; that fix fails, and
                          only a wider look (traffic, saturation) finds the real cause.
+  - low_sev_recurring:   a release breaks the gift-card balance endpoint again. Barely any business
+                         impact, no customer cases, and the same rollback fixed it twice before:
+                         a candidate for a fast-tracked (one-click) rollback.
 """
 
 from __future__ import annotations
@@ -122,6 +125,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                     "title": "checkout-api 5xx after release v2.9.0",
                     "root_cause": "Serialization bug in new release",
                     "resolution": "rollback_deploy; recovered in 6 min",
+                    "resolution_action": "rollback_deploy",
+                    "verified": True,
                 }
             ]
         },
@@ -182,6 +187,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                     "title": "checkout-api errors during payments-gateway brownout",
                     "root_cause": "payments-gateway degraded (provider issue)",
                     "resolution": "toggle_feature_flag checkout.payments_async_queue=true; paged team-payments",
+                    "resolution_action": "toggle_feature_flag",
+                    "verified": True,
                 }
             ]
         },
@@ -265,6 +272,8 @@ SCENARIOS["deploy_red_herring"] = {
                 "title": "checkout-api DB pool exhaustion during Black Friday promo",
                 "root_cause": "Traffic 2x normal; pool sized for baseline",
                 "resolution": "scale_out to 12 replicas",
+                "resolution_action": "scale_out",
+                "verified": True,
             }
         ]
     },
@@ -327,3 +336,88 @@ for _name, _cases_result in {
 }.items():
     SCENARIOS[_name]["pagerduty_list_service_integrations"] = _INTEGRATIONS
     SCENARIOS[_name]["salesforce_search_cases"] = _cases_result
+
+
+# --- Low severity, recurring: the fast-track case ---------------------------------------------
+
+SCENARIOS["low_sev_recurring"] = {
+    "pagerduty_get_incident": {
+        **_INCIDENT,
+        "incident_id": "PD-1001",
+        "title": "[Datadog] checkout-api gift-card balance endpoint error rate above 1%",
+        "urgency": "low",
+        "alert": {"monitor": "checkout-api gift-card errors", "threshold": 0.01, "value": 0.02},
+    },
+    "pagerduty_get_service_context": _SERVICE_CONTEXT,
+    "pagerduty_list_service_integrations": _INTEGRATIONS,
+    "changes_list_recent": {
+        "changes": [
+            {
+                "type": "deploy",
+                "deploy_id": "dep-7750",
+                "version": "v2.16.0",
+                "previous_version": "v2.15.3",
+                "at": "2026-10-16T02:51:00Z",
+                "author": "ci-bot",
+                "summary": "Refactor gift-card balance lookup",
+            }
+        ]
+    },
+    "datadog_list_triggered_monitors": {
+        "monitors": [{"name": "checkout-api gift-card errors", "service": SERVICE, "since": "2026-10-16T02:57:00Z"}]
+    },
+    "datadog_query_metrics": {
+        "business_kpi": _metric(950, 941, None),  # gift cards are a sliver of checkouts
+        "error_rate": _metric(0.004, 0.02, "2026-10-16T02:54:00Z"),
+        "latency_p99": _metric(420, 425, None),
+        "request_rate": _metric(1800, 1795, None),
+        "cpu": _metric(0.41, 0.42, None),
+        "memory": _metric(0.55, 0.55, None),
+        "db_pool_usage": _metric(0.35, 0.35, None),
+    },
+    "datadog_search_logs": {
+        "patterns": [
+            {
+                "template": "IllegalStateException in GiftCardBalanceHandler.lookup version=v2.16.0",
+                "count": 310,
+                "first_seen": "2026-10-16T02:53:30Z",
+            }
+        ]
+    },
+    "datadog_get_dependency_health": {
+        "dependencies": [
+            {"service": "payments-gateway", "error_rate": 0.002, "baseline_error_rate": 0.002, "p99_ms": 305},
+            {"service": "inventory-svc", "error_rate": 0.001, "baseline_error_rate": 0.001, "p99_ms": 91},
+            {"service": "checkout-db", "error_rate": 0.0, "baseline_error_rate": 0.0, "p99_ms": 12},
+        ]
+    },
+    "pagerduty_search_similar_incidents": {
+        "incidents": [
+            {
+                "incident_id": "PD-910",
+                "title": "checkout-api gift-card balance errors after release v2.11.0",
+                "root_cause": "Gift-card lookup regression",
+                "resolution": "rollback_deploy; recovered in 4 min",
+                "resolution_action": "rollback_deploy",
+                "verified": True,
+            },
+            {
+                "incident_id": "PD-955",
+                "title": "checkout-api gift-card balance errors after release v2.13.0",
+                "root_cause": "Gift-card lookup regression",
+                "resolution": "rollback_deploy; recovered in 5 min",
+                "resolution_action": "rollback_deploy",
+                "verified": True,
+            },
+        ]
+    },
+    "runbook_get": _RUNBOOK,
+    "salesforce_search_cases": {"baseline_per_hour": 1.5, "cases": [_UNRELATED_CASE]},
+}
+
+EFFECTS["low_sev_recurring"] = {
+    "rollback_deploy": {
+        "lag_reads": 1,
+        "metrics": {"error_rate": _metric(0.004, 0.004, "2026-10-16T03:12:00Z")},
+    },
+}

@@ -114,7 +114,7 @@ class SREAgent:
         )
 
         # Triage, no model: severity and priority from data, before anyone reasons about causes.
-        state.triage = triage(
+        state.triage = executor.triage = triage(
             seen.get("pagerduty_get_incident", {}), seen.get("business_kpi"), seen.get("salesforce_search_cases")
         )
         state.timeline.append(TimelineEntry(
@@ -237,6 +237,7 @@ class SREAgent:
         )
         state.proposed_actions = executor.proposed_actions
         state.tool_log = executor.log
+        executor.triage = state.triage
         return executor
 
     def _investigate(self, incident, state: AgentResult, executor: ToolExecutor, signatures, started,
@@ -297,6 +298,15 @@ class SREAgent:
             note = raise_only(state.triage, impact.get("suggested_severity"), impact.get("scope", "investigation findings"))
             if note:
                 state.timeline.append(TimelineEntry(self.now(), "triage", note, "agent"))
+                if state.triage["response_mode"] != "low":
+                    for p in state.proposed_actions:
+                        if p.fast_track and p.status == "pending_approval":
+                            p.fast_track, p.fast_track_reason = False, None
+                            state.timeline.append(TimelineEntry(
+                                self.now(), "triage",
+                                f"Fast-track withdrawn from {p.action}: severity is now {state.triage['severity']}.",
+                                "agent",
+                            ))
         self._checkpoint(incident, state)
         return state
 

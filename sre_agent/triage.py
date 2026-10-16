@@ -139,3 +139,29 @@ def raise_only(t: dict[str, Any], suggested: str | None, reason: str) -> str | N
 def summary(t: dict[str, Any]) -> str:
     facing = {True: "customer-facing", False: "no customer reports", None: "customer impact unknown"}[t["customer_facing"]]
     return f"{t['severity']} / {t['priority']}, {facing}, response mode: {t['response_mode']}."
+
+
+# How many past incidents on this service must have been fixed, and verified, by the same action.
+FAST_TRACK_MIN_VERIFIED = 2
+
+
+def fast_track_reason(
+    t: dict[str, Any] | None, action: str, similar_incidents: list[dict[str, Any]], a_fix_already_failed: bool
+) -> str | None:
+    """Is this proposal a known-good, low-impact fix that can be offered as a one-click approval?
+
+    It is still only a proposal: a human approves it. Fast-track changes how it is presented and who
+    may approve it, not whether approval is needed. All conditions, decided by code:
+      - it is a rollback to the previous (known stable) version, the lowest-risk action in the catalog;
+      - triage says low impact: SEV-4/5 *and* we positively know customers aren't reporting it;
+      - the same action fixed this service before, verified, at least FAST_TRACK_MIN_VERIFIED times;
+      - nothing has already failed in this incident (then we are not in a known situation).
+    """
+    if action != "rollback_deploy" or t is None or t["response_mode"] != "low" or a_fix_already_failed:
+        return None
+    verified = [i for i in similar_incidents if i.get("resolution_action") == action and i.get("verified")]
+    if len(verified) < FAST_TRACK_MIN_VERIFIED:
+        return None
+    ids = ", ".join(i["incident_id"] for i in verified)
+    return (f"{t['severity']}, no customer reports, and the same rollback fixed this service "
+            f"{len(verified)} times before, verified ({ids}).")

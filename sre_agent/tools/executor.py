@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol
 
 from sre_agent.models import IncidentRef, ProposedAction, SideEffect, ToolCallRecord
 from sre_agent.tools.registry import REGISTRY
+from sre_agent.triage import fast_track_reason
 
 
 class MCPClient(Protocol):
@@ -54,6 +55,8 @@ class ToolExecutor:
         # a rollback may only target a seen deploy; a verification check is anchored on a seen metric.
         self._seen_deploy_ids: set[str] = set()
         self._seen_metrics: dict[str, dict[str, Any]] = {}  # latest summary per metric
+        self._seen_similar: list[dict[str, Any]] = []  # past incidents, for fast-track eligibility
+        self.triage: dict[str, Any] | None = None  # set by the agent once triage has run
         for message in transcript or []:  # rebuilt from the transcript when resuming or recovering
             if message["role"] == "tool":
                 try:
@@ -121,6 +124,8 @@ class ToolExecutor:
                 self._seen_deploy_ids.add(change["deploy_id"])
         if "metric" in result and "baseline" in result and "current" in result:
             self._seen_metrics[result["metric"]] = result
+        if isinstance(result.get("incidents"), list):
+            self._seen_similar = result["incidents"]
 
     # --- action proposals ------------------------------------------------------------------
 
@@ -170,6 +175,8 @@ class ToolExecutor:
                     return {"status": "pending_approval", "note": "Already proposed. Waiting on a human."}
                 if existing.status == "rejected":
                     raise ToolRejected(f"{action} {params} was rejected by {existing.decided_by}. Do not re-propose.")
+        a_fix_failed = any(p.verification_verdict == "did_not_work" for p in self.proposed_actions)
+        fast_track = fast_track_reason(self.triage, action, self._seen_similar, a_fix_failed)
         self.proposed_actions.append(
             ProposedAction(
                 action=action,
@@ -179,11 +186,14 @@ class ToolExecutor:
                 risk=args["risk"],
                 expected_effect=args["expected_effect"],
                 how_to_verify=verify,
+                fast_track=fast_track is not None,
+                fast_track_reason=fast_track,
             )
         )
         return {
             "status": "pending_approval",
-            "note": "NOT executed. Shown to the responder for approval. Do not assume it has happened.",
+            "note": "NOT executed. Shown to the responder for approval. Do not assume it has happened."
+            + (f" Offered as a one-click (fast-track) approval: {fast_track}" if fast_track else ""),
         }
 
     def _check_verification(self, verify: dict[str, Any]) -> None:

@@ -35,6 +35,9 @@ class ProposedAction:
     status: str = "pending_approval"
     decided_by: str | None = None
     verification_verdict: str | None = None
+    # Decided by code (triage.fast_track_reason), never by the model. Still needs a human's approval.
+    fast_track: bool = False
+    fast_track_reason: str | None = None
 
 
 @dataclass

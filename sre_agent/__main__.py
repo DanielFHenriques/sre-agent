@@ -93,7 +93,10 @@ def print_result(result: AgentResult) -> None:
     print("\nAWAITING YOUR APPROVAL (nothing has been executed):")
     for i, p in enumerate(pending(result), 1):
         params = ", ".join(f"{k}={v}" for k, v in p.params.items())
-        print(f"  [{i}] {p.action}({params})\n      why:    {p.rationale}")
+        print(f"  [{i}] {p.action}({params})" + ("   << FAST-TRACK: one-click approval >>" if p.fast_track else ""))
+        if p.fast_track:
+            print(f"      fast-track because: {p.fast_track_reason}")
+        print(f"      why:    {p.rationale}")
         print(f"      risk:   [{p.risk['level']}] {p.risk['description']}")
         print(f"      expect: {p.expected_effect}")
         if p.how_to_verify:
