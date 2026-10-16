@@ -223,6 +223,63 @@ What I would change next: the first pass should check saturation whenever the er
 timeout or pool exhaustion, even when a deploy looks guilty. A real eval set would be built from
 cases like this: incidents where the obvious answer was wrong.
 
+## Triage: severity first, from data
+
+Severity decides how big the response is, so it is decided before the model reasons about causes,
+by code (`triage.py`):
+
+- **Prefetch in two waves.** Wave 1 is the incident, the service and its integrations. Wave 2 reads
+  only the sources the service has: changes, monitors, business KPI, error rate, Salesforce cases
+  since onset.
+- **Business impact.** The KPI drop sets the base severity.
+- **Customer reports win over quiet graphs.** A burst of related support cases (compared with the
+  normal rate) sets a SEV-3 floor; enterprise accounts or 20+ cases set SEV-2.
+- **Priority.** Severity, adjusted by PagerDuty urgency and enterprise cases.
+- **Response mode.** major (bring in the Incident Commander and subject-matter experts; only the
+  Incident Commander approves), standard, or low.
+- **Unknown is never zero.** Missing, failed or truncated case data means "customer impact
+  unknown", and that never counts as low. (This was a real bug while building it: 22 raw cases blew
+  the output cap and the truncated blob read as zero. The case tool now aggregates at the source.)
+- **Raise-only.** The investigation can raise severity; lowering it is the Incident Commander's call.
+
+**Fast-track.** For low severity, the brief still forbids autonomous actions, so the best we can do
+is make the safe, known fix cheap to approve. Code marks a rollback as fast-track only if all of
+these hold:
+- triage says low (SEV-4/5 and no customer reports);
+- the same rollback fixed this service, verified, at least twice;
+- nothing has already failed in this incident.
+
+The model can't claim it, and raising the severity withdraws it.
+
+## Guardrails: engineers asking the agent questions
+
+Three layers, because each one alone is beatable:
+
+1. **Deterministic screen** before any model call:
+   - injection, system-prompt and "how are you built" extraction, secrets, exploitation requests;
+   - action requests and "I approve" typed in chat;
+   - code requests, off-topic questions, over-long pastes;
+   - vulnerability, CVE and breach reports go to the security incident process instead.
+
+   Text is normalized first, which defeats cheap obfuscation but not paraphrase.
+2. **Structure.** Each question gets its own thread, with the briefing and the question as data.
+   Read-only tools are offered and also enforced by the executor. The question never touches the
+   investigation transcript. An injection that gets through has nothing to act on and cannot
+   poison the next investigation step.
+3. **Output filter.** Blocks answers that quote our instructions, contain secret-shaped strings,
+   or contain code.
+
+Every question is recorded on the incident with its verdict.
+
+**Approvals.** The agent never executes. Approval is a separate step checked by `ApprovalPolicy`,
+read live from the incident:
+- the approver must be on PagerDuty's responder roster;
+- in a major incident, only the Incident Commander can approve;
+- no roster means no approvals.
+
+Identity comes from the surface's SSO login, never from text in the chat or a password or code
+typed to the agent.
+
 ## Open questions to raise in the session
 
 - The brief refers to "the region-outage burst above", but the scenario text does not describe
