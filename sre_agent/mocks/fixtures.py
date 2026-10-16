@@ -184,3 +184,27 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "runbook_get": _RUNBOOK,
     },
 }
+
+# What the world looks like after an approved action lands. `lag_reads` is how many metric reads
+# still show the old value (the rollout takes a while). An action with no entry changes nothing.
+EFFECTS: dict[str, dict[str, dict[str, Any]]] = {
+    "bad_deploy": {
+        "rollback_deploy": {
+            "lag_reads": 1,
+            "metrics": {
+                "error_rate": _metric(0.004, 0.003, "2026-10-16T03:14:00Z"),
+                "business_kpi": _metric(950, 945, "2026-10-16T03:14:00Z"),
+            },
+        },
+    },
+    "dependency_outage": {
+        "toggle_feature_flag": {
+            "lag_reads": 1,
+            "metrics": {
+                "error_rate": _metric(0.004, 0.012, "2026-10-16T03:13:00Z"),
+                "business_kpi": _metric(950, 930, "2026-10-16T03:13:00Z"),
+            },
+        },
+        # Rolling back a healthy service does not fix a sick dependency: no entry, nothing changes.
+    },
+}

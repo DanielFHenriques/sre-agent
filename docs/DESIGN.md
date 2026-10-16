@@ -142,7 +142,7 @@ repeat:
 | Size up | prefetch + investigation + impact | |
 | Stabilize | `propose_action` (approval-gated, with risk) | |
 | Update | final assessment only | timeline entries as decisions happen (Scribe), not a stream of chat |
-| Verify | none | After an approved action, re-query the same metrics and say whether it worked. The brief asks for this too. |
+| Verify | `Remediator.approve`: run the approved action, poll `how_to_verify` every minute for its window | Verdict comes from code, not the model: worked / did_not_work / unknown (metric unreadable is never success). Outcome is appended to the transcript. |
 
 **Communication rules that apply to agent output too.**
 - *Clear is better than concise; no acronym soup.* The responder may have been asleep 2 minutes ago.

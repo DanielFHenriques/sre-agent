@@ -2,6 +2,7 @@
 
     py -m sre_agent --scenario bad_deploy
     py -m sre_agent --scenario dependency_outage --fail datadog_search_logs
+    py -m sre_agent --scenario bad_deploy --approve 1          # approve proposal 1, then verify it
     py -m sre_agent --llm openai          # real model, mocked tools (needs `openai` + OPENAI_API_KEY)
 """
 
@@ -13,9 +14,11 @@ from typing import Any
 
 from sre_agent.agent import SREAgent
 from sre_agent.llm import MockReasoningLLM, OpenAIChatClient
+from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SCENARIOS, SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
 from sre_agent.models import IncidentRef
+from sre_agent.remediation import Remediator
 
 
 def _short(text: str, n: int = 110) -> str:
@@ -40,13 +43,18 @@ def main() -> None:
     parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="bad_deploy")
     parser.add_argument("--fail", action="append", default=[], help="tool name to make time out (repeatable)")
     parser.add_argument("--llm", choices=["mock", "openai"], default="mock")
+    parser.add_argument("--approve", type=int, action="append", default=[],
+                        help="approve proposal N after the investigation, then verify it (repeatable)")
+    parser.add_argument("--approver", default="responder@acme.example")
     parser.add_argument("--json", action="store_true", help="dump the full OpenAI-format transcript")
     args = parser.parse_args()
 
     llm = OpenAIChatClient() if args.llm == "openai" else MockReasoningLLM()
-    agent = SREAgent(llm, MockMCPClient(args.scenario, set(args.fail)), on_message=print_message)
+    mcp = MockMCPClient(args.scenario, set(args.fail))
+    incident = IncidentRef("PD-1001", TENANT, SERVICE)
+    agent = SREAgent(llm, mcp, on_message=print_message)
     print(f"Incident PD-1001 on {SERVICE} (tenant {TENANT}), scenario={args.scenario}")
-    result = agent.run(IncidentRef("PD-1001", TENANT, SERVICE))
+    result = agent.run(incident)
 
     a = result.assessment or {}
     print("\n" + "=" * 78)
@@ -75,6 +83,18 @@ def main() -> None:
             print(f"      verify: {v['metric']} {v['comparison']} {v['threshold']} within {v['within_minutes']} min")
     if not result.proposed_actions:
         print("  (none)")
+
+    if args.approve:
+        # Simulated clock: polls every 60 s of "incident time" without actually waiting.
+        remediator = Remediator(MockActionRunner(mcp), mcp, incident, sleep=lambda s: None)
+        for n in args.approve:
+            proposal = result.proposed_actions[n - 1]
+            print(f"\nAPPROVED [{n}] {proposal.action} by {args.approver}: executing, then verifying")
+            v = remediator.approve(proposal, args.approver, transcript=result.messages)
+            for r in v.readings:
+                print(f"  check {r['attempt']}: " + (f"error {r['error']}" if "error" in r
+                      else f"{r['value']} {'PASS' if r['passed'] else 'not yet'}"))
+            print(f"  VERDICT: {v.verdict.upper()}. {v.detail}")
 
     print("\nTOOL CALL LOG:")
     for r in result.tool_log:

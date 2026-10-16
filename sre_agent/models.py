@@ -31,7 +31,19 @@ class ProposedAction:
     risk: dict[str, Any]
     expected_effect: str
     how_to_verify: dict[str, Any] | None  # machine-checkable, so a verify step can run it later
+    # pending_approval -> approved -> executed | execution_failed ; or pending_approval -> rejected
     status: str = "pending_approval"
+    decided_by: str | None = None
+
+
+@dataclass
+class Verification:
+    """Did the approved action work? Decided by code from the metric, not by the model."""
+
+    action: str
+    verdict: str  # worked | did_not_work | unknown | not_executed | not_applicable
+    detail: str
+    readings: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

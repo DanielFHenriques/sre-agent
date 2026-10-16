@@ -14,6 +14,7 @@ Python 3.11+, standard library only.
 py -m sre_agent --scenario bad_deploy
 py -m sre_agent --scenario dependency_outage
 py -m sre_agent --scenario bad_deploy --fail datadog_search_logs   # partial failure
+py -m sre_agent --scenario bad_deploy --approve 1                   # approve, execute (mocked), verify
 py -m unittest discover -s tests -t .
 ```
 
@@ -29,7 +30,8 @@ model from `OPENAI_MODEL`). Tools stay mocked.
 | `sre_agent/tools/executor.py` | Policy gate: validation, tenant injection, timeouts, proposals, truncation, call log |
 | `sre_agent/agent.py` | Core loop: prefetch, model <-> tools, budgets, stall detection, forced final answer |
 | `sre_agent/llm.py` | `MockReasoningLLM` (deterministic) and `OpenAIChatClient` |
-| `sre_agent/mocks/` | Two incidents that page identically but need opposite fixes |
+| `sre_agent/remediation.py` | Human approval, execution and metric verification; unreachable from the model |
+| `sre_agent/mocks/` | Two incidents that page identically but need opposite fixes, plus what each action changes |
 
 ## Status
 
