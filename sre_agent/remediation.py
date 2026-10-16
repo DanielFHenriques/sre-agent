@@ -11,7 +11,8 @@ import json
 import time
 from typing import Any, Callable, Protocol
 
-from sre_agent.models import IncidentRef, ProposedAction, Verification
+from sre_agent.models import IncidentRef, ProposedAction, TimelineEntry, Verification
+from sre_agent.timeline import Now, describe, utc_now
 from sre_agent.tools.executor import MCPClient, ToolExecutor
 
 
@@ -31,39 +32,55 @@ class Remediator:
         incident: IncidentRef,
         poll_interval_s: float = 60.0,
         sleep: Callable[[float], None] = time.sleep,
+        now: Now = utc_now,
     ):
         self.runner = runner
         self.incident = incident
         self.poll_interval_s = poll_interval_s
         self.sleep = sleep
+        self.now = now
         # Verification reads go through the same policy gate as the agent's: tenant-scoped and logged.
         self.executor = ToolExecutor(mcp, incident)
 
-    def reject(self, proposal: ProposedAction, rejected_by: str) -> None:
+    def reject(self, proposal: ProposedAction, rejected_by: str, timeline: list[TimelineEntry] | None = None) -> None:
         self._require_pending(proposal)
         proposal.status = "rejected"
         proposal.decided_by = rejected_by
+        self._log(timeline, "rejected", f"Rejected {describe(proposal)}.", rejected_by)
 
     def approve(
-        self, proposal: ProposedAction, approved_by: str, transcript: list[dict[str, Any]] | None = None
+        self,
+        proposal: ProposedAction,
+        approved_by: str,
+        transcript: list[dict[str, Any]] | None = None,
+        timeline: list[TimelineEntry] | None = None,
     ) -> Verification:
         """Run an approved proposal, then check its how_to_verify. Appends the outcome to the transcript
-        (if given) so the next model turn starts from what actually happened."""
+        (if given) so the next model turn starts from what actually happened, and to the timeline."""
         self._require_pending(proposal)
         proposal.status = "approved"
         proposal.decided_by = approved_by
+        self._log(timeline, "approved", f"Approved {describe(proposal)}.", approved_by)
         try:
             self.runner.run(proposal, tenant_id=self.incident.tenant_id, approved_by=approved_by)
         except Exception as e:
             proposal.status = "execution_failed"
             result = Verification(proposal.action, "not_executed", f"Execution failed: {e}")
+            self._log(timeline, "executed", f"{describe(proposal)} failed to run: {e}", "automation")
         else:
             proposal.status = "executed"
+            self._log(timeline, "executed", f"Ran {describe(proposal)}.", "automation")
             result = self._verify(proposal)
+            self._log(timeline, "verified", f"Verification of {proposal.action}: {result.verdict}. {result.detail}",
+                      "automation")
         proposal.verification_verdict = result.verdict
         if transcript is not None:
             transcript.append({"role": "user", "content": _transcript_note(proposal, result)})
         return result
+
+    def _log(self, timeline: list[TimelineEntry] | None, kind: str, text: str, actor: str) -> None:
+        if timeline is not None:
+            timeline.append(TimelineEntry(self.now(), kind, text, actor))
 
     def _require_pending(self, proposal: ProposedAction) -> None:
         if proposal.status != "pending_approval":

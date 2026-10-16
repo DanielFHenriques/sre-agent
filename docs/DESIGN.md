@@ -141,7 +141,7 @@ repeat:
 |---|---|---|
 | Size up | prefetch + investigation + impact | |
 | Stabilize | `propose_action` (approval-gated, with risk) | |
-| Update | final assessment only | timeline entries as decisions happen (Scribe), not a stream of chat |
+| Update | `timeline.py`: entries written by code as findings and decisions happen | Done. Posting entries to Slack/Teams is not built. |
 | Verify | `Remediator.approve`: run the approved action, poll `how_to_verify` every minute for its window | Verdict comes from code, not the model: worked / did_not_work / unknown (metric unreadable is never success). Outcome is appended to the transcript. |
 
 **Communication rules that apply to agent output too.**
@@ -161,6 +161,40 @@ blameless postmortems afterwards. Both want the same artifact: a timeline of wha
 decided, and why. If the agent keeps that timeline as it goes, it becomes the handover brief, the
 postmortem draft, and the input to memory for the next incident. That makes State and Memory the
 natural next areas to build.
+
+## State: surviving a restart, a deploy, a handover
+
+**What is the state.** One document per incident (`AgentResult`): the OpenAI-format transcript,
+proposals with their status and verification outcome, the tool call log, the Scribe timeline, the
+cycle number, and a version. Nothing important lives only in process memory.
+
+**When it is saved.** After the prefetch, after every model response (model output is the
+expensive, non-deterministic part; re-asking may give a different answer), after every round of
+tool results, after each approval round, and at the end. `stop_reason: "in_progress"` marks a
+mid-investigation checkpoint.
+
+**Restart.** `SREAgent.recover` continues from the last checkpoint. The awkward case is a crash
+after the model asked for tools but before their results were written: the transcript then ends
+with unanswered `tool_calls`, which OpenAI rejects on the next request. Recovery re-runs exactly
+those calls. That is safe because reads are idempotent, proposals are de-duplicated by the
+executor, and nothing the agent can call executes anything. If the agent could execute actions,
+this would need idempotency keys per action, and that is the main reason I would keep execution
+outside the agent.
+
+**Two writers.** Every save is a compare-and-swap on `version`. If a responder approves something
+from Slack while the agent is checkpointing (or a second agent process picks up the same incident),
+one write fails with `ConflictError` instead of silently erasing the other. The loser reloads and
+retries. Here the store is a file per incident; in production it would be a row or document with a
+conditional write, plus a lease so only one agent process works an incident at a time.
+
+**Handover.** The brief (`timeline.handover_brief`) is built from stored state, not from anyone's
+memory of the call: impact, leading hypothesis and what was ruled out (with why), what was already
+tried and whether it worked, what is waiting for approval, open questions, and the timeline.
+The handover itself is a timeline entry.
+
+**What a six-hour incident does to this.** The transcript grows without bound. Before it hits
+the context limit it needs compaction: replace old raw tool results with a summary and keep the
+timeline and the current assessment verbatim. The timeline is already the compact form. Not built.
 
 ## When an approved fix does not work
 

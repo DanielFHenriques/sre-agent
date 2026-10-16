@@ -60,7 +60,22 @@ class ToolCallRecord:
 
 
 @dataclass
+class TimelineEntry:
+    """Scribe-style: what was found or decided, by whom, when. Not a dictation of every tool call."""
+
+    at: str  # ISO 8601, UTC
+    kind: str  # triggered | impact | hypothesis | proposed | approved | rejected | executed | verified | reinvestigating | escalated | stopped_early | restarted | handover
+    text: str
+    actor: str  # "agent", "automation", or the human's id
+
+
+@dataclass
 class AgentResult:
+    """Everything about one incident's investigation. Also the unit that gets persisted.
+
+    stop_reason "in_progress" means a checkpoint taken mid-investigation (the process may have died).
+    """
+
     incident_id: str
     stop_reason: str
     steps: int
@@ -69,3 +84,5 @@ class AgentResult:
     tool_log: list[ToolCallRecord] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
     cycle: int = 1  # 1 = first investigation, 2+ = re-investigation after a failed fix
+    timeline: list[TimelineEntry] = field(default_factory=list)
+    version: int = 0  # bumped on every save; used to detect two writers (optimistic concurrency)

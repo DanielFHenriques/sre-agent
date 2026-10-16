@@ -1,7 +1,9 @@
 """The core loop: prefetch, then model <-> tools until an assessment, a budget, or a stall.
 
-The transcript is kept in OpenAI Chat Completions format. It is the whole working state of an
-investigation, which is what you would persist to survive a restart (not done in this sketch).
+The transcript is kept in OpenAI Chat Completions format. Together with proposals, the call log,
+the timeline and the cycle number it is the whole state of an investigation (`AgentResult`).
+With a store attached, that state is checkpointed after every model response and every round of
+tool results, so a process that dies mid-investigation can be picked up with `recover`.
 """
 
 from __future__ import annotations
@@ -12,8 +14,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from sre_agent.llm import LLMClient
-from sre_agent.models import AgentResult, IncidentRef, Verification
+from sre_agent.models import AgentResult, IncidentRef, TimelineEntry, Verification
 from sre_agent.prompts import SYSTEM_PROMPT
+from sre_agent.state import FileStateStore
+from sre_agent.timeline import Now, investigation_entries, proposal_entry, utc_now
 from sre_agent.tools.executor import MCPClient, ToolExecutor
 from sre_agent.tools.registry import openai_tools
 
@@ -22,7 +26,7 @@ FORCE_ASSESSMENT = {"type": "function", "function": {"name": "submit_assessment"
 
 @dataclass(frozen=True)
 class Budget:
-    max_steps: int = 6  # model calls, excluding the forced final one
+    max_steps: int = 6  # model calls per investigation, excluding the forced final one
     max_tool_calls: int = 20
     max_wall_clock_s: float = 120.0  # the responder should see something within ~2 min
     max_stalled_steps: int = 2  # consecutive steps that only repeat earlier calls
@@ -48,20 +52,27 @@ class SREAgent:
         budget: Budget = Budget(),
         clock: Callable[[], float] = time.monotonic,
         on_message: Callable[[dict[str, Any]], None] | None = None,
+        store: FileStateStore | None = None,
+        now: Now = utc_now,
     ):
         self.llm = llm
         self.mcp = mcp
         self.budget = budget
         self.clock = clock
         self.on_message = on_message or (lambda m: None)
+        self.store = store
+        self.now = now
 
     def run(self, incident: IncidentRef) -> AgentResult:
         started = self.clock()
-        executor = ToolExecutor(self.mcp, incident)
-        tools = openai_tools()
-        messages: list[dict[str, Any]] = []
-        self._append(messages, {"role": "system", "content": SYSTEM_PROMPT})
-        self._append(messages, {
+        state = AgentResult(incident.incident_id, stop_reason="in_progress", steps=0, assessment=None)
+        executor = self._executor(incident, state)
+        state.timeline.append(TimelineEntry(
+            self.now(), "triggered",
+            f"Incident {incident.incident_id} triggered on {incident.service_id}. Agent started investigating.", "agent",
+        ))
+        self._append(state.messages, {"role": "system", "content": SYSTEM_PROMPT})
+        self._append(state.messages, {
             "role": "user",
             "content": f"Incident {incident.incident_id} triggered on service {incident.service_id}. "
             "Investigate and recommend the next step.",
@@ -73,12 +84,13 @@ class SREAgent:
             {"id": f"prefetch_{i}", "type": "function", "function": {"name": n, "arguments": json.dumps(a)}}
             for i, (n, a) in enumerate(prefetch_calls(incident))
         ]
-        self._append(messages, {"role": "assistant", "content": None, "tool_calls": prefetch})
+        self._append(state.messages, {"role": "assistant", "content": None, "tool_calls": prefetch})
         signatures: set[tuple[str, str]] = set()
         for call in prefetch:
-            self._run_call(call, executor, messages, signatures)
+            self._run_call(call, executor, state.messages, signatures)
+        self._checkpoint(incident, state)
 
-        return self._investigate(incident, messages, executor, signatures, started, cycle=1)
+        return self._investigate(incident, state, executor, signatures, started, previous_assessment=None)
 
     def resume(self, incident: IncidentRef, previous: AgentResult, verification: Verification) -> AgentResult:
         """Re-investigate after an approved action did not work, on the same transcript.
@@ -90,56 +102,108 @@ class SREAgent:
         if verification.verdict != "did_not_work":
             raise ValueError(f"resume is for failed fixes, got verdict '{verification.verdict}'")
         started = self.clock()
-        messages = list(previous.messages)
-        # A fresh executor that remembers what this incident has already seen and tried.
-        executor = ToolExecutor(
-            self.mcp,
-            incident,
-            known_deploy_ids=deploy_ids_in(messages),
-            prior_proposals=previous.proposed_actions,
-            prior_log=previous.tool_log,
+        state = AgentResult(
+            incident.incident_id,
+            stop_reason="in_progress",
+            steps=0,
+            assessment=None,
+            proposed_actions=previous.proposed_actions,
+            tool_log=previous.tool_log,
+            messages=list(previous.messages),
+            cycle=previous.cycle + 1,
+            timeline=list(previous.timeline),
+            version=previous.version,
         )
-        cycle = previous.cycle + 1
-        if cycle > self.budget.max_cycles:
-            return AgentResult(
-                incident_id=incident.incident_id,
-                stop_reason="cycle_limit",
-                steps=0,
-                assessment=_escalation(previous, verification),
-                proposed_actions=executor.proposed_actions,
-                tool_log=executor.log,
-                messages=messages,
-                cycle=previous.cycle,
-            )
+        executor = self._executor(incident, state)
 
-        self._append(messages, {
+        if state.cycle > self.budget.max_cycles:
+            state.cycle = previous.cycle
+            state.stop_reason = "cycle_limit"
+            state.assessment = _escalation(previous, verification)
+            state.timeline.append(TimelineEntry(
+                self.now(), "escalated",
+                f"{verification.action} did not work and the cycle limit is reached. Agent stopped proposing "
+                "fixes; handed back to humans.", "agent",
+            ))
+            self._checkpoint(incident, state)
+            return state
+
+        state.timeline.append(TimelineEntry(
+            self.now(), "reinvestigating",
+            f"{verification.action} did not work ({verification.detail}) Re-investigating (cycle {state.cycle}).", "agent",
+        ))
+        self._append(state.messages, {
             "role": "user",
             "content": f"[re-investigate] The approved {verification.action} did not work: {verification.detail} "
             "Your leading hypothesis is probably wrong. Fetch fresh data (earlier results are stale now), "
             "look wider than last time (traffic, saturation, dependencies), and do not propose the same "
             "action again.",
         })
+        self._checkpoint(incident, state)
         # Fresh signatures: re-reading a metric after an action is new information, not a stall.
-        return self._investigate(incident, messages, executor, set(), started, cycle=cycle)
+        return self._investigate(incident, state, executor, set(), started, previous_assessment=previous.assessment)
 
-    def _investigate(self, incident, messages, executor: ToolExecutor, signatures, started, cycle) -> AgentResult:
+    def recover(self, incident: IncidentRef, state: AgentResult) -> AgentResult:
+        """Continue an investigation whose process died, from its last checkpoint.
+
+        The checkpoint may end with an assistant message whose tool calls were never answered (the
+        process died while running them). Those are run now: reads are idempotent, proposals are
+        de-duplicated by the executor, so re-running is safe. Without this the transcript would be
+        invalid for the next model call.
+        """
+        if state.stop_reason != "in_progress":
+            raise ValueError(f"nothing to recover: investigation already ended ({state.stop_reason})")
+        started = self.clock()
+        executor = self._executor(incident, state)
+        state.timeline.append(TimelineEntry(
+            self.now(), "restarted",
+            f"Agent process restarted. Continuing cycle {state.cycle} from the checkpoint after step {state.steps}.",
+            "agent",
+        ))
+
+        assessment = self._answer_dangling_calls(state, executor)
+        self._checkpoint(incident, state)
+        if assessment is not None:
+            return self._finish(incident, state, executor, assessment, "assessment_submitted", None)
+        return self._investigate(incident, state, executor, set(), started, previous_assessment=None)
+
+    # -------------------------------------------------------------------------------------------
+
+    def _executor(self, incident: IncidentRef, state: AgentResult) -> ToolExecutor:
+        """An executor that knows what this incident has already seen and tried, sharing state's lists."""
+        executor = ToolExecutor(
+            self.mcp,
+            incident,
+            known_deploy_ids=deploy_ids_in(state.messages),
+            prior_proposals=state.proposed_actions,
+            prior_log=state.tool_log,
+        )
+        state.proposed_actions = executor.proposed_actions
+        state.tool_log = executor.log
+        return executor
+
+    def _investigate(self, incident, state: AgentResult, executor: ToolExecutor, signatures, started,
+                     previous_assessment) -> AgentResult:
         tools = openai_tools()
+        messages = state.messages
         calls_before = len(executor.log)
-        steps, stalled, assessment = 0, 0, None
+        stalled, assessment = 0, None
         stop_reason = "step_budget"
-        while steps < self.budget.max_steps:
+        while state.steps < self.budget.max_steps:
             if self.clock() - started > self.budget.max_wall_clock_s:
                 stop_reason = "deadline"
                 break
-            steps += 1
+            state.steps += 1
             message = self._complete(messages, tools)
             self._append(messages, message)
+            self._checkpoint(incident, state)  # a model response costs money and time; don't lose it
             calls = message.get("tool_calls") or []
             if not calls:
                 self._append(messages, {"role": "user", "content": "Finish by calling submit_assessment."})
                 continue
 
             new_info = False
+            proposals_before = len(executor.proposed_actions)
             for call in calls:
                 if len(executor.log) - calls_before >= self.budget.max_tool_calls:
                     # Every tool_call_id must get a reply or the next request is invalid.
@@ -148,6 +212,9 @@ class SREAgent:
                 new_info |= self._run_call(call, executor, messages, signatures)
                 if call["function"]["name"] == "submit_assessment" and executor.log[-1].status == "ok":
                     assessment = executor.log[-1].arguments
+            for p in executor.proposed_actions[proposals_before:]:
+                state.timeline.append(proposal_entry(self.now(), p))
+            self._checkpoint(incident, state)
 
             if assessment is not None:
                 stop_reason = "assessment_submitted"
@@ -160,21 +227,38 @@ class SREAgent:
                 stop_reason = "tool_budget"
                 break
 
+        return self._finish(incident, state, executor, assessment, stop_reason, previous_assessment)
+
+    def _finish(self, incident, state: AgentResult, executor, assessment, stop_reason, previous_assessment) -> AgentResult:
         if assessment is None:
-            assessment = self._force_assessment(stop_reason, messages, tools, executor)
+            assessment = self._force_assessment(stop_reason, state.messages, openai_tools(), executor)
+        state.assessment = assessment
+        state.stop_reason = stop_reason
+        state.timeline.extend(investigation_entries(self.now(), previous_assessment, assessment, stop_reason, state.cycle))
+        self._checkpoint(incident, state)
+        return state
 
-        return AgentResult(
-            incident_id=incident.incident_id,
-            stop_reason=stop_reason,
-            steps=steps,
-            assessment=assessment,
-            proposed_actions=executor.proposed_actions,
-            tool_log=executor.log,
-            messages=messages,
-            cycle=cycle,
-        )
+    def _answer_dangling_calls(self, state: AgentResult, executor: ToolExecutor) -> dict[str, Any] | None:
+        messages = state.messages
+        last = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=None)
+        if last is None or not messages[last].get("tool_calls"):
+            return None
+        answered = {m["tool_call_id"] for m in messages[last + 1:] if m["role"] == "tool"}
+        assessment = None
+        proposals_before = len(executor.proposed_actions)
+        for call in messages[last]["tool_calls"]:
+            if call["id"] in answered:
+                continue
+            self._run_call(call, executor, messages, set())
+            if call["function"]["name"] == "submit_assessment" and executor.log[-1].status == "ok":
+                assessment = executor.log[-1].arguments
+        for p in executor.proposed_actions[proposals_before:]:
+            state.timeline.append(proposal_entry(self.now(), p))
+        return assessment
 
-    # -------------------------------------------------------------------------------------------
+    def _checkpoint(self, incident: IncidentRef, state: AgentResult) -> None:
+        if self.store is not None:
+            self.store.save(incident, state)
 
     def _force_assessment(self, reason, messages, tools, executor) -> dict[str, Any]:
         """Degrade, don't die: the responder always gets the best partial answer we have."""

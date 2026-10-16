@@ -7,6 +7,9 @@
     py -m sre_agent --scenario deploy_red_herring --approve 1 --approve 1
         # cycle 1: approve the rollback; it fails verification, so the agent re-investigates;
         # cycle 2: approve the first new pending proposal
+    py -m sre_agent --scenario deploy_red_herring --state-dir .state --crash-after-steps 2
+    py -m sre_agent --scenario deploy_red_herring --state-dir .state --recover --approve 1 --handover-to bob
+        # the process "dies" mid-investigation; the second run picks up from the checkpoint
     py -m sre_agent --llm openai          # real model, mocked tools (needs `openai` + OPENAI_API_KEY)
 """
 
@@ -21,8 +24,10 @@ from sre_agent.llm import MockReasoningLLM, OpenAIChatClient
 from sre_agent.mocks.actions import MockActionRunner
 from sre_agent.mocks.fixtures import SCENARIOS, SERVICE, TENANT
 from sre_agent.mocks.mcp import MockMCPClient
-from sre_agent.models import AgentResult, IncidentRef, ProposedAction, Verification
+from sre_agent.models import AgentResult, IncidentRef, ProposedAction, TimelineEntry, Verification
 from sre_agent.remediation import Remediator
+from sre_agent.state import FileStateStore
+from sre_agent.timeline import handover_brief, utc_now
 
 
 def _short(text: str, n: int = 110) -> str:
@@ -40,6 +45,20 @@ def print_message(m: dict[str, Any]) -> None:
         print(f"       <- {_short(m['content'])}")
     elif m["role"] == "user" and "Incident" not in m["content"]:
         print(f"\n  [controller] {_short(m['content'], 200)}")
+
+
+class CrashAfter:
+    """Wraps a model client and kills the process after N calls, to demo checkpoint recovery."""
+
+    def __init__(self, llm, calls: int):
+        self.llm, self.remaining = llm, calls
+
+    def complete(self, *args, **kwargs):
+        if self.remaining == 0:
+            raise SystemExit("\n*** simulated crash: agent process died mid-investigation. "
+                             "Run the same command with --recover instead of --crash-after-steps. ***")
+        self.remaining -= 1
+        return self.llm.complete(*args, **kwargs)
 
 
 def pending(result: AgentResult) -> list[ProposedAction]:
@@ -95,18 +114,43 @@ def main() -> None:
         "cycle: used only if a fix fails verification and the agent re-investigates.",
     )
     parser.add_argument("--approver", default="responder@acme.example")
+    parser.add_argument("--state-dir", help="persist incident state here (checkpointed every step)")
+    parser.add_argument("--crash-after-steps", type=int,
+                        help="simulate the agent process dying after N model calls (needs --state-dir)")
+    parser.add_argument("--recover", action="store_true",
+                        help="load the incident from --state-dir and continue where it stopped")
+    parser.add_argument("--handover-to", help="hand the incident over to this person and print the brief")
     parser.add_argument("--json", action="store_true", help="dump the full OpenAI-format transcript")
     args = parser.parse_args()
+    if (args.crash_after_steps or args.recover) and not args.state_dir:
+        parser.error("--crash-after-steps and --recover need --state-dir")
 
     llm = OpenAIChatClient() if args.llm == "openai" else MockReasoningLLM()
+    if args.crash_after_steps:
+        llm = CrashAfter(llm, args.crash_after_steps)
     mcp = MockMCPClient(args.scenario, set(args.fail))
     incident = IncidentRef("PD-1001", TENANT, SERVICE)
-    agent = SREAgent(llm, mcp, on_message=print_message)
+    store = FileStateStore(args.state_dir) if args.state_dir else None
+    agent = SREAgent(llm, mcp, on_message=print_message, store=store)
     # Simulated clock: verification polls every 60 s of "incident time" without actually waiting.
     remediator = Remediator(MockActionRunner(mcp), mcp, incident, sleep=lambda s: None)
 
     print(f"Incident PD-1001 on {SERVICE} (tenant {TENANT}), scenario={args.scenario}")
-    result = agent.run(incident)
+    saved = store.load(incident) if store else None
+    if args.recover:
+        if saved is None:
+            parser.error(f"no saved state for {incident.incident_id} in {args.state_dir}")
+        if saved.stop_reason == "in_progress":
+            print(f"RECOVERING from checkpoint v{saved.version}: cycle {saved.cycle}, {saved.steps} model steps done, "
+                  f"{len(saved.messages)} messages")
+            result = agent.recover(incident, saved)
+        else:
+            print(f"LOADED saved state v{saved.version} (investigation finished: {saved.stop_reason})")
+            result = saved
+    else:
+        if saved is not None:
+            parser.error(f"{incident.incident_id} already has saved state in {args.state_dir}; use --recover")
+        result = agent.run(incident)
     print_result(result)
 
     for picks in args.approve:
@@ -114,15 +158,30 @@ def main() -> None:
         failed = None
         for proposal in chosen:
             print(f"\nAPPROVED {proposal.action} by {args.approver}: executing, then verifying")
-            v = remediator.approve(proposal, args.approver, transcript=result.messages)
+            v = remediator.approve(proposal, args.approver, transcript=result.messages, timeline=result.timeline)
             print_verification(v)
             if v.verdict == "did_not_work" and failed is None:
                 failed = v
+        if store:
+            store.save(incident, result)
         if failed is None:
             break
         print(f"\nRE-INVESTIGATING: {failed.action} did not work.")
         result = agent.resume(incident, result, failed)
         print_result(result)
+
+    if args.handover_to:
+        result.timeline.append(TimelineEntry(
+            utc_now(), "handover", f"Handover from {args.approver} to {args.handover_to}.", args.approver
+        ))
+        if store:
+            store.save(incident, result)
+        print("\n" + "=" * 78)
+        print(handover_brief(result, args.approver, args.handover_to))
+    else:
+        print("\nTIMELINE:")
+        for t in result.timeline:
+            print(f"  {t.at}  [{t.actor}] {t.text}")
 
     print("\nTOOL CALL LOG (all cycles):")
     for r in result.tool_log:
