@@ -177,9 +177,9 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
             "evidence_against": [] if new_patterns else ["Could not confirm the errors come from the new code"],
         })
         proposals.append({
-            **blank,
             "action": "rollback_deploy",
             "target_service": service,
+            **blank,
             "deploy_id": suspect["deploy_id"],
             "rationale": f"Errors started {int((onset - _ts(suspect['at'])).total_seconds() // 60)} min after "
             f"{suspect['version']} shipped; dependencies are healthy. "
@@ -211,9 +211,9 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
         flag = re.search(r"toggle_feature_flag ([\w.]+)=(true|false)", json.dumps(runbook))
         if flag:
             proposals.append({
-                **blank,
                 "action": "toggle_feature_flag",
                 "target_service": service,
+                **blank,
                 "flag_name": flag.group(1),
                 "flag_value": flag.group(2) == "true",
                 "rationale": f"Runbook mitigation for {dep['service']} failures: queue payments for retry instead of failing checkout.",
@@ -222,9 +222,9 @@ def _decide(seen: _Seen, incident: dict[str, Any]) -> dict[str, Any]:
         team = re.search(r"page (team-[\w-]+)", json.dumps(runbook))
         if team:
             proposals.append({
-                **blank,
                 "action": "page_team",
                 "target_service": service,
+                **blank,
                 "team": team.group(1),
                 "rationale": f"{dep['service']} is the source; its owners need to be engaged.",
                 "evidence": evidence[:1],
