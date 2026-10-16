@@ -71,6 +71,11 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("failure_modes", out)
         self.assertEqual(self.mcp.calls[-1]["tenant_id"], TENANT)
 
+    def test_support_cases_come_from_salesforce_scoped_to_tenant(self):
+        out = self.ex.execute("salesforce_search_cases", json.dumps({"service_id": SERVICE, "lookback_minutes": 60}))
+        self.assertIn("baseline_per_hour", out)
+        self.assertEqual((self.mcp.calls[-1]["server"], self.mcp.calls[-1]["tenant_id"]), ("salesforce", TENANT))
+
     def test_extra_arguments_rejected(self):
         out = self.ex.execute("runbook_get", json.dumps({"service_id": SERVICE, "tenant_id": "other-corp"}))
         self.assertEqual(out["error"], "rejected")

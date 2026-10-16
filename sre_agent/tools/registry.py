@@ -31,6 +31,8 @@ class ToolDef:
 _TOOLS = [
     ToolDef(specs.GET_INCIDENT, SideEffect.READ, "pagerduty"),
     ToolDef(specs.GET_SERVICE_CONTEXT, SideEffect.READ, "pagerduty"),
+    ToolDef(specs.LIST_SERVICE_INTEGRATIONS, SideEffect.READ, "pagerduty"),
+    ToolDef(specs.SEARCH_SUPPORT_CASES, SideEffect.READ, "salesforce"),
     ToolDef(specs.LIST_RECENT_CHANGES, SideEffect.READ, "changes"),
     ToolDef(specs.LIST_TRIGGERED_MONITORS, SideEffect.READ, "datadog"),
     ToolDef(specs.QUERY_METRICS, SideEffect.READ, "datadog"),

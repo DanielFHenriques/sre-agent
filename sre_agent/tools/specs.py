@@ -48,6 +48,20 @@ GET_SERVICE_CONTEXT = function_tool(
     {"service_id": SERVICE_ID},
 )
 
+LIST_SERVICE_INTEGRATIONS = function_tool(
+    "pagerduty_list_service_integrations",
+    "Which observability, deploy, feature-flag and support tools are connected to this service. "
+    "Decides which data sources exist for it.",
+    {"service_id": SERVICE_ID},
+)
+
+SEARCH_SUPPORT_CASES = function_tool(
+    "salesforce_search_cases",
+    "Customer support cases opened in the lookback window that may relate to this service, with the "
+    "normal rate of new cases. A burst of related cases after onset means the incident is customer-facing.",
+    {"service_id": SERVICE_ID, "lookback_minutes": LOOKBACK},
+)
+
 LIST_RECENT_CHANGES = function_tool(
     "changes_list_recent",
     "Deploys, config changes and feature-flag flips for a service in the lookback window, newest first.",

@@ -281,3 +281,46 @@ EFFECTS["deploy_red_herring"] = {
         },
     },
 }
+
+
+# --- Integrations and support cases ----------------------------------------------------------
+
+_INTEGRATIONS = {
+    "integrations": [
+        {"vendor": "datadog", "provides": ["metrics", "logs", "apm", "monitors"]},
+        {"vendor": "github_actions", "provides": ["deploys"]},
+        {"vendor": "launchdarkly", "provides": ["feature_flags"]},
+        {"vendor": "salesforce", "provides": ["support_cases"]},
+    ]
+}
+
+# Noise every window has: a case unrelated to this service, opened before onset.
+_UNRELATED_CASE = {
+    "case_id": "500-0091", "created_at": "2026-10-16T02:31:00Z", "account": "Globex", "tier": "standard",
+    "subject": "Invoice PDF missing line items", "related_service": "billing-api",
+}
+
+
+def _cases(n: int, subject: str, enterprise: int) -> dict[str, Any]:
+    """n related cases opened after the 02:54 onset, `enterprise` of them from enterprise accounts."""
+    cases = [
+        {
+            "case_id": f"500-{1100 + i}",
+            "created_at": f"2026-10-16T02:{56 + i // 4:02d}:{(i * 13) % 60:02d}Z",
+            "account": f"Customer {i + 1}",
+            "tier": "enterprise" if i < enterprise else "standard",
+            "subject": subject,
+            "related_service": SERVICE,
+        }
+        for i in range(n)
+    ]
+    return {"window_minutes": 60, "baseline_per_hour": 1.5, "cases": [_UNRELATED_CASE, *cases]}
+
+
+for _name, _cases_result in {
+    "bad_deploy": _cases(14, "Checkout fails with 'something went wrong'", enterprise=2),
+    "dependency_outage": _cases(22, "Payment declined at checkout, card is fine", enterprise=3),
+    "deploy_red_herring": _cases(9, "Checkout very slow then times out", enterprise=1),
+}.items():
+    SCENARIOS[_name]["pagerduty_list_service_integrations"] = _INTEGRATIONS
+    SCENARIOS[_name]["salesforce_search_cases"] = _cases_result
