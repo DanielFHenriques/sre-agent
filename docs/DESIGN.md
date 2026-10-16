@@ -104,6 +104,64 @@ assessment must list it under open questions. The run never crashes because one 
   decides what happens when it is called.
 - Tool output is truncated to a fixed size so one noisy log query cannot blow the context.
 
+## Fitting into PagerDuty's own incident response process
+
+Source: PagerDuty's open-source incident response training (response.pagerduty.com). It is
+built on the Incident Command System (ICS): an Incident Commander (IC) who decides, a Scribe who keeps
+the timeline, Subject Matter Experts (SMEs) who fix things, and liaisons who handle communication.
+The agent should slot into that process, not invent its own.
+
+**Which role the agent plays.** The agent is an **SME's investigator plus a Scribe**. It is never
+the IC. The course is explicit that the IC is the single source of truth, that no action happens
+unless the IC says so, and that the IC coordinates rather than resolves. That lines up with the
+brief's "no autonomous actions": the human responder is the IC, and `propose_action` is the agent
+bringing an option to the IC. It also keeps the agent out of the "one person taking on multiple
+roles" anti-pattern.
+
+**The IC's three questions become the output contract.** An IC asks the experts:
+*What's wrong?* (size-up), *What actions can we take?*, and *What are the risks?* A proposal without
+its risk is not decidable. So each proposal should carry:
+
+| IC question | Field (today) | Gap |
+|---|---|---|
+| What's wrong? | `submit_assessment.summary`, `hypotheses` | No impact or scope statement (who is affected, how much) |
+| What can we do? | `propose_action` | ok |
+| What are the risks? | none | Add `risk`, `expected_effect` and `how_to_verify` to `propose_action` |
+| How confident? | `confidence` | ok |
+
+**Severity from business impact, not CPU.** The course recommends tying severity to a business
+metric (orders per second, notifications per second). The agent's size-up should lead with that
+metric (for checkout: successful checkouts per minute), and could suggest a severity level for the IC
+to confirm. A CPU graph alone cannot tell you severity.
+
+**The response cycle maps onto the loop.** The course describes size-up, stabilize, update, verify,
+repeat:
+
+| Cycle step | Agent today | To add |
+|---|---|---|
+| Size up | prefetch + investigation | impact statement |
+| Stabilize | `propose_action` (approval-gated) | risk per proposal |
+| Update | final assessment only | timeline entries as decisions happen (Scribe), not a stream of chat |
+| Verify | none | After an approved action, re-query the same metrics and say whether it worked. The brief asks for this too. |
+
+**Communication rules that apply to agent output too.**
+- *Clear is better than concise; no acronym soup.* The responder may have been asleep 2 minutes ago.
+- *Avoid the bystander effect.* Never "someone should check the DB". Name a role or person, give a
+  time box, and say when the agent will check back.
+- *Too-frequent status updates are an anti-pattern.* Post when something changes: a new hypothesis,
+  a proposal, a verification result. Not on every tool call.
+- *"Do nothing" is an acceptable decision, and no decision is the worst one.* The agent always gives
+  a recommendation, even if it is "wait 5 minutes and re-check X". This is why budget stops force
+  a final assessment.
+- *Avoid tunnel vision ("overly focussed on one issue").* Keep competing hypotheses with evidence
+  against, which the assessment already does.
+
+**Handovers and postmortems.** The course encourages IC handovers on long incidents and
+blameless postmortems afterwards. Both want the same artifact: a timeline of what was seen, what was
+decided, and why. If the agent keeps that timeline as it goes, it becomes the handover brief, the
+postmortem draft, and the input to memory for the next incident. That makes State and Memory the
+natural next areas to build.
+
 ## Open questions to raise in the session
 
 - The brief refers to "the region-outage burst above", but the scenario text does not describe
