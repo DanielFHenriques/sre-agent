@@ -1,19 +1,19 @@
 """Run one mocked incident end to end and print what the responder would see.
 
-    py -m sre_agent --scenario bad_deploy
-    py -m sre_agent --scenario dependency_outage --fail logs_search
-    py -m sre_agent --scenario bad_deploy --approve 1                 # approve proposal 1, then verify it
-    py -m sre_agent --scenario dependency_outage --approve 1,2        # approve two proposals at once
-    py -m sre_agent --scenario deploy_red_herring --approve 1 --approve 1
+    python -m sre_agent --scenario bad_deploy
+    python -m sre_agent --scenario dependency_outage --fail logs_search
+    python -m sre_agent --scenario bad_deploy --approve 1                 # approve proposal 1, then verify it
+    python -m sre_agent --scenario dependency_outage --approve 1,2        # approve two proposals at once
+    python -m sre_agent --scenario deploy_red_herring --approve 1 --approve 1
         # cycle 1: approve the rollback; it fails verification, so the agent re-investigates;
         # cycle 2: approve the first new pending proposal
-    py -m sre_agent --scenario deploy_red_herring --state-dir .state --crash-after-steps 2
-    py -m sre_agent --scenario deploy_red_herring --state-dir .state --recover --approve 1 --handover-to bob
+    python -m sre_agent --scenario deploy_red_herring --state-dir .state --crash-after-steps 2
+    python -m sre_agent --scenario deploy_red_herring --state-dir .state --recover --approve 1 --handover-to bob
         # the process "dies" mid-investigation; the second run picks up from the checkpoint
-    py -m sre_agent --scenario deploy_red_herring --memory-dir .memory --approve 1 --approve 1
-    py -m sre_agent --scenario deploy_red_herring --memory-dir .memory --incident-id PD-1002
+    python -m sre_agent --scenario deploy_red_herring --memory-dir .memory --approve 1 --approve 1
+    python -m sre_agent --scenario deploy_red_herring --memory-dir .memory --incident-id PD-1002
         # second time, memory points it straight at saturation: scale_out in the first cycle
-    py -m sre_agent --llm openai          # real model, mocked tools (needs `openai` + OPENAI_API_KEY)
+    python -m sre_agent --llm openai          # real model, mocked tools (needs `openai` + OPENAI_API_KEY)
 """
 
 from __future__ import annotations
