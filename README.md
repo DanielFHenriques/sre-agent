@@ -16,7 +16,8 @@ default, the model. Tools and messages use the OpenAI Chat Completions function-
 OpenAI model can be swapped in.
 
 The longer design notes, including the brainstorm this started from, are in
-[docs/DESIGN.md](docs/DESIGN.md).
+[docs/DESIGN.md](docs/DESIGN.md). The decisions, assumptions, known gaps and open questions are
+summarised in [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Run it
 
