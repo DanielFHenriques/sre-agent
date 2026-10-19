@@ -87,7 +87,8 @@ Ordered by how much each one matters.
 |---|---|---|
 | No evaluation against a real model | The 130 tests cover the deterministic code around a hard-coded mock. They say nothing about how good a real model's investigations are | Run each scenario N times against a real model. Measure correct-action rate, tool calls and tokens. Add more cases where the obvious answer is wrong. This can be tried for free: the `openai` SDK reads `OPENAI_BASE_URL`, so `OpenAIChatClient` can point at any OpenAI-compatible endpoint with no code change. Examples are a local model through Ollama, or the free tiers of Gemini, Groq or GitHub Models. Check that the chosen model supports function calling and strict schemas, and expect weaker results from small local models |
 | Verification uses one reading and a fixed 3x ratio | One dip counts as a successful fix. The ratio doesn't fit every metric | The historical-range decision above. Consecutive readings first, because it is cheap |
-| The approval roster is a snapshot | This is a gap between the docs and the code. Triage is read live from state, but `ApprovalPolicy.roster()` reads the first `responders` tool result in the transcript. After a handover, the new Incident Commander may be refused while the old one can still approve. `briefing()` (`agent.py:505`) has the same pattern: it takes recent changes from the transcript by scanning tool messages for the substring `"changes"` | Re-fetch the roster at approval time through the executor, or record handovers as roster changes in state. Read `briefing()`'s changes from the typed tool result, not a substring match |
+| The approval roster is a snapshot | This is a gap between the docs and the code. Triage is read live from state, but `ApprovalPolicy.roster()` reads the first `responders` tool result in the transcript. After a handover, the new Incident Commander may be refused while the old one can still approve. `briefing()` (`agent.py:505`) has the same pattern: it takes recent changes from the transcript by scanning tool messages for the substring `"changes"` | Replace the transcript scans with a typed snapshot in `AgentResult` (roster, recent changes), refreshed through the executor at approval time and on handover. `ApprovalPolicy` and `briefing()` read the snapshot, never the transcript |
+| An `unknown` verdict is a dead end | When the metric can't be read, `Remediator._verify` returns `unknown`. `resume` only accepts `did_not_work` (`agent.py:169`), and nothing escalates. The action has run, but nobody is told that its effect is unconfirmed, and the incident is neither resumable nor handed back | Decide the policy in code. Escalate to the Incident Commander with "executed, unverified", keep re-reading the metric for a bounded time, and never feed `unknown` into memory as a success or a failure |
 | Output truncation cuts JSON mid-way | The model may misread half a document. It already caused one triage bug | Summarise or aggregate at the source, as support cases and logs already do |
 | Tenant isolation has only one layer in the sketch | The executor's injection is the only layer built. The MCP servers are mocked, and the mock only refuses tenants other than `acme-corp`. A bug in the executor would have nothing behind it | Every MCP server enforces per-tenant credentials, so a wrong `tenant_id` gets no data. Add tests that try to cross tenants through each path: tools, state, memory and verification |
 | No context compaction | A six-hour incident will exceed the context window | Replace old raw tool results with summaries. Keep the timeline and the current assessment verbatim |
@@ -100,7 +101,11 @@ Ordered by how much each one matters.
   in review, and should say so before anyone else does. The docs imply approvals follow the live
   incident, as triage does. In the code, the roster is fixed at the first fetch, so after a handover
   the wrong person can approve. The fix is small: re-fetch the roster at approval time, or record
-  handovers in state. `briefing()` has the same pattern. See the gap above.
+  handovers in state. `briefing()` has the same pattern. The cleaner fix is one typed snapshot in
+  `AgentResult` (roster, changes), refreshed through the executor at approval time. See the gap above.
+- **An `unknown` verdict has no next step.** If verification can't read the metric, the fix has
+  run but the incident is neither resumable nor escalated. We'd escalate it as "executed,
+  unverified" and keep re-reading the metric for a bounded time.
 
 ## Open questions for the interviewers
 
